@@ -15,6 +15,7 @@ from factory.cli._ceo_helpers import (
     _validate_ceo_flags,
     _validate_late_flags,
 )
+from factory.cli._helpers import DESIGN_MODES
 from factory.cli._mode_handlers import (
     _auto_detect_mode,
     handle_deep_qa_mode,
@@ -72,6 +73,24 @@ def cmd_ceo(args: argparse.Namespace) -> int:
      deferred_spec, needs_materialize, design_existing, create_description,
      update_existing_mode) = resolved
 
+    plugin_mode = getattr(args, "plugin", False)
+    plugin_folder = getattr(args, "folder", None)
+
+    if plugin_mode and mode != "create":
+        print(
+            "Error: --plugin requires --mode create. "
+            "Usage: factory ceo /path --mode create --focus 'my mode' --plugin",
+            file=sys.stderr,
+        )
+        return 1
+
+    if plugin_folder and not plugin_mode:
+        print(
+            "Warning: --folder is ignored without --plugin.",
+            file=sys.stderr,
+        )
+        plugin_folder = None
+
     no_github = getattr(args, "no_github", False)
     issue_number: int | None = None
     issue_url: str | None = None
@@ -118,8 +137,8 @@ def cmd_ceo(args: argparse.Namespace) -> int:
         return err
 
     if design_existing:
-        banner_mode = "design"
-    elif mode in ("design", "research") and (design_idea or research_ideation):
+        banner_mode = mode if mode == "design-v2" else "design"
+    elif mode in (*DESIGN_MODES, "research") and (design_idea or research_ideation):
         banner_mode = "ideation"
     else:
         banner_mode = mode
@@ -140,6 +159,8 @@ def cmd_ceo(args: argparse.Namespace) -> int:
         research_ideation=research_ideation,
         create_description=create_description,
         update_existing_mode=update_existing_mode,
+        plugin_mode=plugin_mode,
+        plugin_folder=plugin_folder,
         deferred_spec=deferred_spec,
         needs_materialize=needs_materialize,
         refine_request=refine_request,
@@ -161,9 +182,12 @@ def cmd_refactory(args: argparse.Namespace) -> int:
     from factory.agents.runner import resolve_prompt
     from factory.refactory import get_session_id, setup_workspace
 
-    claude_path = shutil.which("claude")
+    from factory.runners.claude import _claude_bin
+
+    bin_ = _claude_bin()
+    claude_path = shutil.which(bin_)
     if not claude_path:
-        print("Error: 'claude' CLI not found. Install Claude Code first.", file=sys.stderr)
+        print(f"Error: '{bin_}' CLI not found. Install Claude Code first.", file=sys.stderr)
         return 1
 
     project_path = Path(getattr(args, "path", None) or Path.cwd()).resolve()
@@ -196,7 +220,7 @@ def cmd_refactory(args: argparse.Namespace) -> int:
 
     if is_new_session:
         cmd = [
-            "claude",
+            bin_,
             "--session-id",
             session_id,
             "--append-system-prompt-file",
@@ -207,7 +231,7 @@ def cmd_refactory(args: argparse.Namespace) -> int:
         ]
     else:
         cmd = [
-            "claude",
+            bin_,
             "--resume",
             session_id,
             "--append-system-prompt-file",
@@ -225,5 +249,5 @@ def cmd_refactory(args: argparse.Namespace) -> int:
         cmd.extend(["--mcp-config", str(mcp_config), "--strict-mcp-config"])
 
     os.chdir(project_path)
-    os.execvp("claude", cmd)
+    os.execvp(bin_, cmd)
     return 0

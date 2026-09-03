@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Final
 
@@ -43,6 +47,62 @@ _SHARED_SYMLINK_ENTRIES: Final[tuple[str, ...]] = (
 _COPY_ENTRIES: Final[tuple[str, ...]] = (
     "agents",
 )
+
+
+WORKTREE_VENV_MARKER: Final[str] = ".factory-managed"
+
+
+def _setup_worktree_venv(worktree_path: Path) -> Path | None:
+    """Create a per-worktree Python venv if pyproject.toml is present.
+
+    Tries ``uv sync`` first (auto-creates ``.venv`` + editable install).
+    Falls back to ``python -m venv`` + ``uv pip install -e``.
+    Returns the venv path on success, ``None`` on skip/failure.
+    """
+    if not (worktree_path / "pyproject.toml").exists():
+        return None
+
+    result = subprocess.run(
+        ["uv", "sync", "--directory", str(worktree_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        venv_path = worktree_path / ".venv"
+        (venv_path / WORKTREE_VENV_MARKER).touch()
+        log.info("worktree_venv_created", method="uv_sync", path=str(venv_path))
+        return venv_path
+
+    log.warning("worktree_venv_uv_sync_failed", stderr=result.stderr[:200])
+
+    venv_path = worktree_path / ".venv"
+    result = subprocess.run(
+        [sys.executable, "-m", "venv", str(venv_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.warning("worktree_venv_fallback_venv_failed", stderr=result.stderr[:200])
+        return None
+
+    result = subprocess.run(
+        ["uv", "pip", "install", "-e", str(worktree_path)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "VIRTUAL_ENV": str(venv_path)},
+    )
+    if result.returncode != 0:
+        log.warning("worktree_venv_fallback_install_failed", stderr=result.stderr[:200])
+        return None
+
+    (venv_path / WORKTREE_VENV_MARKER).touch()
+    log.info("worktree_venv_created", method="fallback", path=str(venv_path))
+    return venv_path
+
+
+def is_factory_venv(project_path: Path) -> bool:
+    """Return True if the .venv at project_path was created by the factory."""
+    return (project_path / ".venv" / WORKTREE_VENV_MARKER).exists()
 
 
 def create_worktree(
@@ -152,6 +212,8 @@ def create_worktree(
 
     log.info("worktree_created", branch=branch, path=str(wt_dir))
 
+    _setup_worktree_venv(wt_dir)
+
     try:
         from factory.events import emit_event
 
@@ -202,6 +264,8 @@ def create_experiment_worktree(
     )
 
     _seed_experiment_factory(factory_dir, wt_dir / ".factory")
+
+    _setup_worktree_venv(wt_dir)
 
     log.info("experiment_worktree_created", branch=branch, path=str(wt_dir))
 
@@ -260,6 +324,40 @@ def _sync_backlog_to_main(worktree_path: Path, project_path: Path) -> None:
         log.info("backlog_synced", src=str(wt_backlog), dst=str(main_backlog))
 
 
+_BOOTSTRAP_FACTORY_FILES: Final[tuple[str, ...]] = (
+    "config.json",
+    "eval_profile.json",
+)
+
+
+def _sync_bootstrap_to_main(worktree_path: Path, project_path: Path) -> None:
+    """Sync bootstrap artifacts from worktree back to main project.
+
+    Only copies files that are real (not symlinks), meaning they were freshly
+    created during this run rather than symlinked from main.
+    """
+    wt_factory = worktree_path / ".factory"
+    main_factory = project_path / ".factory"
+
+    if not wt_factory.exists():
+        return
+
+    main_factory.mkdir(parents=True, exist_ok=True)
+    for filename in _BOOTSTRAP_FACTORY_FILES:
+        src = wt_factory / filename
+        if src.exists() and not src.is_symlink():
+            dst = main_factory / filename
+            if not dst.exists():
+                shutil.copy2(src, dst)
+                log.info("bootstrap_synced", file=filename, src=str(src), dst=str(dst))
+
+    wt_factory_md = worktree_path / "factory.md"
+    main_factory_md = project_path / "factory.md"
+    if wt_factory_md.exists() and not wt_factory_md.is_symlink() and not main_factory_md.exists():
+        shutil.copy2(wt_factory_md, main_factory_md)
+        log.info("bootstrap_synced", file="factory.md", src=str(wt_factory_md), dst=str(main_factory_md))
+
+
 def _preserve_telemetry(worktree_path: Path, project_path: Path) -> None:
     """Copy telemetry files from worktree .factory/ to main project .factory/."""
     wt_factory = worktree_path / ".factory"
@@ -283,9 +381,11 @@ def _has_active_sessions(worktree_path: Path) -> bool:
     Returns True if active sessions found, False otherwise.
     Fails open: returns False on any error so removal proceeds.
     """
+    from factory.runners.claude import _claude_bin
+
     try:
         result = subprocess.run(
-            ["claude", "agents", "--json", "--cwd", str(worktree_path)],
+            [_claude_bin(), "agents", "--json", "--cwd", str(worktree_path)],
             capture_output=True,
             text=True,
             timeout=5,
@@ -317,6 +417,85 @@ def _should_remove_worktree(branch: str) -> bool:
         "remove_worktree", env_var="FACTORY_REMOVE_WORKTREE", default="true"
     )
     return (value or "true").lower() in ("true", "1", "yes")
+
+
+def _is_greenfield_run(worktree_path: Path, project_path: Path) -> bool:
+    """Return True if main has no factory.md but the worktree does (non-symlink)."""
+    main_factory_md = project_path / "factory.md"
+    wt_factory_md = worktree_path / "factory.md"
+    return (
+        not main_factory_md.exists()
+        and wt_factory_md.exists()
+        and not wt_factory_md.is_symlink()
+    )
+
+
+def _finalize_greenfield(worktree_path: Path, project_path: Path, branch: str) -> bool:
+    """Ensure factory.md is tracked on the greenfield branch. Returns True on success."""
+    wt_factory_md = worktree_path / "factory.md"
+    if not wt_factory_md.exists():
+        log.warning("finalize_greenfield_no_factory_md", path=str(worktree_path))
+        return False
+
+    result = subprocess.run(
+        ["git", "ls-files", "factory.md"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        log.info("finalize_greenfield_already_tracked", branch=branch)
+        return True
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Factory",
+        "GIT_AUTHOR_EMAIL": "factory@localhost",
+        "GIT_COMMITTER_NAME": "Factory",
+        "GIT_COMMITTER_EMAIL": "factory@localhost",
+    }
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        add_result = subprocess.run(
+            ["git", "add", "factory.md"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        if add_result.returncode != 0:
+            log.warning("finalize_greenfield_add_failed", stderr=add_result.stderr[:200])
+            return False
+
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", "chore: track factory.md for greenfield initialization"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if commit_result.returncode == 0:
+            break
+        if "lock" in commit_result.stderr.lower() and attempt < max_attempts - 1:
+            import time
+
+            time.sleep(0.2 * (attempt + 1))
+            continue
+        log.warning("finalize_greenfield_commit_failed", stderr=commit_result.stderr[:200])
+        return False
+
+    verify = subprocess.run(
+        ["git", "ls-files", "factory.md"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+    )
+    if verify.returncode != 0 or not verify.stdout.strip():
+        log.warning("finalize_greenfield_postcondition_failed", branch=branch)
+        return False
+
+    log.info("finalize_greenfield_committed", branch=branch)
+    return True
 
 
 def remove_worktree(project_path: Path, worktree_path: Path, branch: str) -> None:
@@ -355,7 +534,6 @@ def remove_worktree(project_path: Path, worktree_path: Path, branch: str) -> Non
                 )
             except Exception:
                 pass
-            import sys
 
             print(
                 f"Worktree retained: {worktree_path}\n"
@@ -363,7 +541,26 @@ def remove_worktree(project_path: Path, worktree_path: Path, branch: str) -> Non
                 file=sys.stderr,
             )
             return
+        if worktree_path != project_path and _is_greenfield_run(worktree_path, project_path):
+            if not _finalize_greenfield(worktree_path, project_path, branch):
+                log.warning(
+                    "greenfield_finalization_failed",
+                    worktree=str(worktree_path),
+                    branch=branch,
+                    hint="factory.md not committed; retaining worktree for recovery",
+                )
+                print(
+                    f"WARNING: Greenfield finalization failed — factory.md may not be tracked.\n"
+                    f"Worktree retained: {worktree_path}\n"
+                    f"To recover: cd {worktree_path} && git add factory.md && "
+                    f"git commit -m 'chore: track factory.md'\n"
+                    f"Then clean up: git worktree remove {worktree_path} && git branch -D {branch}",
+                    file=sys.stderr,
+                )
+                return
+
         _sync_backlog_to_main(worktree_path, project_path)
+        _sync_bootstrap_to_main(worktree_path, project_path)
         _preserve_telemetry(worktree_path, project_path)
         shutil.rmtree(worktree_path)
 
@@ -394,8 +591,82 @@ def remove_worktree(project_path: Path, worktree_path: Path, branch: str) -> Non
     )
 
 
+_STANDARD_BRANCH_RE = re.compile(r"^factory/(run-[0-9a-f]+|exp-\d+)$")
+
+
+def _is_standard_factory_branch(branch: str) -> bool:
+    """Return True if *branch* matches the standard factory branch patterns.
+
+    Standard patterns: ``factory/run-<hex>`` and ``factory/exp-<int>``.
+    Human-named branches (e.g. ``fix/readme-content-regression``,
+    ``factory/extract-skillopt-1342``) return False and are never GC'd.
+    """
+    return _STANDARD_BRANCH_RE.match(branch) is not None
+
+
+def _get_branch_last_commit_ts(project_path: Path, branch: str) -> float | None:
+    """Return the UNIX timestamp of the last commit on *branch*, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", branch],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
+
+
+def _compute_idle_seconds(
+    project_path: Path,
+    worktree_path: Path,
+    branch: str,
+) -> float:
+    """Return how many seconds the worktree has been idle.
+
+    Idle age is the *minimum* of (now − last-commit-time) and (now − dir-mtime).
+    Using the minimum means we only consider the worktree idle if BOTH signals
+    indicate inactivity — this is conservative and catches uncommitted work that
+    would only show up in the mtime.
+    """
+    now = time.time()
+    ages: list[float] = []
+
+    commit_ts = _get_branch_last_commit_ts(project_path, branch)
+    if commit_ts is not None:
+        ages.append(now - commit_ts)
+
+    try:
+        dir_mtime = worktree_path.stat().st_mtime
+        ages.append(now - dir_mtime)
+    except OSError:
+        pass
+
+    if not ages:
+        return 0.0  # Can't determine age → treat as fresh (safe default)
+
+    # Return the MINIMUM age — only reclaim when ALL signals agree it's idle
+    return min(ages)
+
+
 def prune_stale(project_path: Path) -> list[str]:
-    """Clean up stale worktrees from crashed runs. Returns list of pruned entries."""
+    """Clean up stale worktrees from crashed runs. Returns list of pruned entries.
+
+    Two sweeps are performed:
+
+    1. **Orphan sweep** — directories under ``.factory-worktrees/`` that git no
+       longer tracks (after ``git worktree prune``).  Uses the real branch from
+       porcelain output when available, falls back to dir-name reconstruction.
+
+    2. **Idle-registered sweep** — worktrees that ARE still git-registered but
+       are idle past a configurable threshold, have no active session, are on a
+       standard ``factory/run-*`` or ``factory/exp-*`` branch, and pass the
+       retention opt-out check.
+    """
     project_path = project_path.resolve()
     if not project_path.exists():
         return []
@@ -408,27 +679,33 @@ def prune_stale(project_path: Path) -> list[str]:
     )
     pruned = [line for line in result.stderr.splitlines() if "Removing" in line]
 
-    # Check both current (.factory-worktrees/) and legacy (.factory/worktrees/) locations
+    # Full set of ALL registered worktree paths (including detached-HEAD) —
+    # used for orphan detection in Sweep 1.
+    active_paths = _list_active_worktrees(project_path)
+    # Path→branch mapping (only worktrees WITH a branch) — used for branch
+    # lookups in Sweep 2 (idle GC).
+    wt_branch_map = _list_worktrees_with_branches(project_path)
+
+    # --- Sweep 1: orphan directories (not in git worktree list) ---
     wt_parents = [
         project_path / ".factory-worktrees",
         project_path / ".factory" / "worktrees",
     ]
-    active: set[str] | None = None
     for wt_parent in wt_parents:
         if not wt_parent.is_dir():
             continue
-        if active is None:
-            active = _list_active_worktrees(project_path)
         for d in wt_parent.iterdir():
-            if d.is_dir() and str(d.resolve()) not in active:
+            if d.is_dir() and str(d.resolve()) not in active_paths:
                 name = d.name
+                # True orphans are not in git's worktree list at all, so
+                # reconstruct the branch name from the directory name.
                 if name.startswith("exp-"):
                     branch = f"factory/{name}"
                 else:
                     branch = f"factory/run-{name.removeprefix('run-')}"
-                    if not _should_remove_worktree(branch):
-                        log.info("worktree_prune_skipped", reason="retention_enabled", name=name)
-                        continue
+                if not name.startswith("exp-") and not _should_remove_worktree(branch):
+                    log.info("worktree_prune_skipped", reason="retention_enabled", name=name)
+                    continue
                 shutil.rmtree(d)
                 pruned.append(f"Removed orphaned directory: {name}")
                 log.info("worktree_pruned_orphan", name=name)
@@ -437,6 +714,112 @@ def prune_stale(project_path: Path) -> list[str]:
                     cwd=project_path,
                     capture_output=True,
                 )
+
+    # --- Sweep 2: idle git-registered worktrees (worktree GC) ---
+    from factory import user_config
+
+    idle_hours_str = user_config.resolve(
+        "worktree_idle_reclaim_hours",
+        env_var="FACTORY_WORKTREE_IDLE_RECLAIM_HOURS",
+        default="24",
+    )
+    try:
+        idle_threshold_secs = float(idle_hours_str or "24") * 3600
+    except (ValueError, TypeError):
+        idle_threshold_secs = 24 * 3600
+
+    wt_base = project_path / ".factory-worktrees"
+    if wt_base.is_dir():
+        for d in sorted(wt_base.iterdir()):
+            if not d.is_dir():
+                continue
+            resolved = str(d.resolve())
+            if resolved not in wt_branch_map:
+                continue  # Already handled (or will be handled) by orphan sweep
+
+            real_branch = wt_branch_map[resolved]
+
+            # (c) Standard branch check
+            if not _is_standard_factory_branch(real_branch):
+                log.debug(
+                    "worktree_gc_skip_nonstandard",
+                    path=str(d),
+                    branch=real_branch,
+                )
+                continue
+
+            # (d) Retention opt-out
+            if not _should_remove_worktree(real_branch):
+                log.debug(
+                    "worktree_gc_skip_retained",
+                    path=str(d),
+                    branch=real_branch,
+                )
+                continue
+
+            # (b) Active session check
+            if _has_active_sessions(d):
+                log.debug(
+                    "worktree_gc_skip_active_session",
+                    path=str(d),
+                    branch=real_branch,
+                )
+                continue
+
+            # (a) Idle check
+            idle_seconds = _compute_idle_seconds(project_path, d, real_branch)
+            if idle_seconds < idle_threshold_secs:
+                log.debug(
+                    "worktree_gc_skip_fresh",
+                    path=str(d),
+                    branch=real_branch,
+                    idle_seconds=idle_seconds,
+                )
+                continue
+
+            # All conditions met — reclaim
+            log.info(
+                "worktree_gc_reclaiming",
+                path=str(d),
+                branch=real_branch,
+                idle_seconds=idle_seconds,
+            )
+
+            _sync_backlog_to_main(d, project_path)
+            _preserve_telemetry(d, project_path)
+            shutil.rmtree(d)
+
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=project_path,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "branch", "-D", real_branch],
+                cwd=project_path,
+                capture_output=True,
+            )
+
+            try:
+                from factory.events import emit_event
+
+                emit_event(
+                    project_path,
+                    "worktree.gc_reclaimed",
+                    data={
+                        "branch": real_branch,
+                        "idle_seconds": idle_seconds,
+                        "worktree_path": str(d),
+                        "reclaim_reason": "idle_standard_branch_no_session",
+                    },
+                )
+            except Exception:
+                pass
+
+            pruned.append(
+                f"GC reclaimed idle worktree: {d.name} (branch={real_branch}, "
+                f"idle={idle_seconds:.0f}s)"
+            )
 
     if pruned:
         log.info("worktree_prune_complete", pruned_count=len(pruned))
@@ -528,14 +911,64 @@ def detect_default_branch(project_path: Path) -> str:
     return "main"
 
 
-def _list_active_worktrees(project_path: Path) -> set[str]:
-    """Return set of absolute paths for all active worktrees."""
+def _list_worktrees_with_branches(project_path: Path) -> dict[str, str]:
+    """Return a mapping of resolved worktree path → branch name.
+
+    Parses ``git worktree list --porcelain`` output.  Blocks are separated by
+    blank lines.  Each block has a ``worktree <path>`` line and optionally a
+    ``branch refs/heads/<name>`` line.  Detached-HEAD worktrees (no ``branch``
+    line) are omitted from the result.
+    """
     result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=project_path,
         capture_output=True,
         text=True,
     )
-    return {
-        line.split(" ", 1)[1] for line in result.stdout.splitlines() if line.startswith("worktree ")
-    }
+    mapping: dict[str, str] = {}
+    current_path: str | None = None
+    current_branch: str | None = None
+
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            # If we had a previous block with both path and branch, record it
+            if current_path is not None and current_branch is not None:
+                mapping[current_path] = current_branch
+            current_path = line.split(" ", 1)[1]
+            current_branch = None
+        elif line.startswith("branch refs/heads/"):
+            current_branch = line.removeprefix("branch refs/heads/")
+        elif line == "":
+            # End of block
+            if current_path is not None and current_branch is not None:
+                mapping[current_path] = current_branch
+            current_path = None
+            current_branch = None
+
+    # Handle the last block (porcelain output may not end with a blank line)
+    if current_path is not None and current_branch is not None:
+        mapping[current_path] = current_branch
+
+    return mapping
+
+
+def _list_active_worktrees(project_path: Path) -> set[str]:
+    """Return set of absolute paths for ALL git-registered worktrees.
+
+    Parses every ``worktree <path>`` line from ``git worktree list --porcelain``,
+    including detached-HEAD worktrees and the main worktree.  This is the
+    authoritative set of paths that git considers "registered" — used for
+    orphan detection in :func:`prune_stale` so that detached-HEAD worktrees
+    are never misclassified as orphans.
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=project_path,
+        capture_output=True,
+        text=True,
+    )
+    paths: set[str] = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.add(line.split(" ", 1)[1])
+    return paths

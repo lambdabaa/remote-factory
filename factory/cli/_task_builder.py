@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re as _re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,14 +10,17 @@ if TYPE_CHECKING:
     from factory.messages import Message
 
 
+def _slug(desc: str) -> str:
+    slug = _re.sub(r"[^a-z0-9]+", "-", desc.lower().strip())
+    return slug.strip("-")[:40]
+
+
 def _mode_suffix(mode: str, discover_only: bool) -> str:
     _SIMPLE_MODE_SUFFIXES = {
-        "build": (
-            "\n\nRun Build mode: the project is new or incomplete. Run the Plan Loop "
-            "(P0-P3) to produce an approved build plan, then follow the Build pipeline "
-            "(B3-B6): Build phases → E2E verification. "
-            "Do NOT skip to Improve mode — the project needs to be built first. "
-            "The full step-by-step playbook is in your system prompt above."
+        "design": (
+            "\n\nRun Design mode: the universal entry point. Design mode handles build, "
+            "discover, and improve workflows inline via its conditional gates. "
+            "Follow the step-by-step playbook in your system prompt above."
         ),
         "meta": (
             "\n\nRun Meta mode: full self-improvement. First, run the complete Improve loop "
@@ -182,9 +186,12 @@ def _build_ceo_task(
     display_mode: str | None = None,
     create_description: str | None = None,
     update_existing_mode: str | None = None,
+    plugin_mode: bool = False,
+    plugin_folder: str | None = None,
     from_plan: str | None = None,
     from_plan_feedback: list[str] | None = None,
     just_plan: bool = False,
+    auto_approve: bool = False,
 ) -> str:
     """Build the CEO agent task string from mode and optional context."""
     shown_mode = display_mode if display_mode is not None else mode
@@ -252,14 +259,37 @@ def _build_ceo_task(
             "4. Seed the backlog: extract phase headers from current.md and append to backlog.md\n\n"
             "Do NOT skip this step. Do NOT exit without publishing.\n"
         )
+    elif design_existing and mode == "design-v2":
+        task += "\n\n## Plan Loop (Interactive)\n\n"
+        task += "**existing_project: true**\n\n"
+        task += (
+            f"You are in design-v2 mode on an existing project at `{project_path}`.\n"
+            "Follow the design-v2 SKILL.md playbook: Research Director, "
+            "Strategy Director, Synthesize, Design Doc, then user approval.\n"
+        )
+        if focus:
+            task += (
+                f"\n**Focus topic (from --focus):** {focus}\n\n"
+                f"The user wants to discuss this specific topic. Use it to seed the "
+                f"research and spec, but be open to the user redirecting.\n"
+            )
+        else:
+            task += (
+                "\nNo specific topic was provided. Study the project broadly — "
+                "look at the backlog, eval scores, open issues, and recent history — "
+                "then present your findings and recommendations.\n"
+            )
     elif design_existing:
         task += (
             f"\n\n## Plan Loop (Interactive)\n\n"
             f"**existing_project: true**\n\n"
-            f"You are in interactive planning mode on an **existing project** at `{project_path}`.\n\n"
-            f"Run the Plan Loop (P0-P3) with interactive approval. Research the project "
-            f"(local study + external best practices), synthesize an improvement spec "
-            f"through user feedback. After you approve the plan at the strategy gate, the workflow continues to implementation automatically.\n\n"
+            f"You are in interactive planning mode on an **existing project** "
+            f"at `{project_path}`.\n\n"
+            f"Run the Plan Loop (P0-P3) with interactive approval. Research the "
+            f"project (local study + external best practices), synthesize an "
+            f"improvement spec through user feedback. After you approve the plan "
+            f"at the strategy gate, the workflow continues to implementation "
+            f"automatically.\n\n"
         )
         if focus:
             task += (
@@ -273,6 +303,17 @@ def _build_ceo_task(
                 "look at the backlog, eval scores, open issues, and recent history — "
                 "then present your findings and recommendations.\n"
             )
+    elif design_idea and mode == "design-v2":
+        task += (
+            f"\n\n## Plan Loop (Interactive)\n\n"
+            f"**Raw idea from user:** {design_idea}\n\n"
+            f"You are in design-v2 mode with a new idea.\n"
+            f"Follow the design-v2 SKILL.md playbook: Research Director, "
+            f"Strategy Director, Synthesize, Design Doc, then user approval.\n\n"
+            f"After you approve the plan at the strategy gate, persist it to "
+            f".factory/strategy/current.md — the workflow continues to "
+            f"implementation automatically.\n"
+        )
     elif design_idea:
         task += (
             f"\n\n## Plan Loop (Interactive)\n\n"
@@ -335,6 +376,61 @@ def _build_ceo_task(
             f"19. Start node is still valid and reachable from all edges\n\n"
             f"Follow the Create workflow playbook in skills/workflow-create/SKILL.md.\n"
         )
+    elif create_description and plugin_mode:
+        folder = plugin_folder if plugin_folder else f"./{_slug(create_description)}-plugin"
+        task += (
+            f"\n\n## Create Mode (Plugin Package)\n\n"
+            f"**Mode description from user:**\n{create_description}\n\n"
+            f"**plugin_mode:** true\n"
+            f"**output_folder:** {folder}\n\n"
+            f"You are creating a PLUGIN workflow — a standalone pip-installable package.\n\n"
+            f"**Package structure:**\n"
+            f"```\n"
+            f"{folder}/\n"
+            f"├── pyproject.toml         # Package metadata + entry point\n"
+            f"├── README.md              # Installation and usage instructions\n"
+            f"└── <mode_name>.py         # Workflow definition + registration\n"
+            f"```\n\n"
+            f"**pyproject.toml requirements:**\n"
+            f"- Build system: hatchling\n"
+            f"- Package name: `factory-<mode-name>-workflow`\n"
+            f"- Version: `0.1.0`\n"
+            f"- `requires-python = '>=3.11'`\n"
+            f"- Dependencies: `['remote-factory']` (no version pin)\n"
+            f"- Entry point group: `[project.entry-points.'factory.plugins']`\n"
+            f"- Entry point value: `<mode_name> = '<mode_name>:register_plugin'`\n\n"
+            f"**Workflow file (`<mode_name>.py`) requirements:**\n"
+            f"- `meta` dict with `name` and `description` keys\n"
+            f"- `workflow()` function returning a `Workflow` object\n"
+            f"- `register_plugin(registry)` function that calls:\n"
+            f"  - `registry.add_modes([meta['name']])`\n"
+            f"  - `registry.add_workflow_search_path(str(Path(__file__).parent))`\n"
+            f"- Only import from `factory.workflow.primitives` and stdlib\n"
+            f"- NO imports from other factory internals\n\n"
+            f"**README.md content:**\n"
+            f"- Project description\n"
+            f"- Installation: `pip install -e {folder}/`\n"
+            f"- Usage: `factory ceo /path/to/project --mode <mode-name>`\n"
+            f"- Verification: `factory workflow list`, `factory workflow validate <name>`\n\n"
+            f"**Verification steps (Builder MUST run all):**\n"
+            f"1. Create the output directory: `mkdir -p {folder}`\n"
+            f"2. Write `pyproject.toml` with correct entry point\n"
+            f"3. Write `<mode_name>.py` with `meta` + `workflow()` + `register_plugin()`\n"
+            f"4. Write `README.md` with installation instructions\n"
+            f"5. Install locally: `pip install -e {folder}/`\n"
+            f"6. Verify discovery: `factory workflow list` (should show the new mode)\n"
+            f"7. Validate graph: `factory workflow validate <mode-name>`\n"
+            f"8. Clean up: `pip uninstall -y factory-<mode-name>-workflow`\n\n"
+            f"**Constraints:**\n"
+            f"- Do NOT modify `factory/workflow/definitions.py` or any upstream factory files\n"
+            f"- Do NOT use `src/` layout — flat layout with workflow `.py` at package root\n"
+            f"- Do NOT `git init` the output directory\n"
+            f"- Do NOT commit the plugin to the factory repo or open a PR — "
+            f"the plugin package stays in the output directory as a standalone artifact\n"
+            f"- Do NOT include a `tests/` directory (users can add their own later)\n\n"
+            f"Follow the Create workflow playbook in skills/workflow-create/SKILL.md.\n"
+        )
+
     elif create_description:
         task += (
             f"\n\n## Create Mode (New Factory Mode)\n\n"
@@ -428,6 +524,20 @@ def _build_ceo_task(
             f"6. Keep/revert verdict + finalize\n"
             f"7. Archivist (single batch)\n\n"
             f"Do NOT skip the review pipeline. Do NOT abbreviate any step.\n"
+        )
+
+    if auto_approve:
+        task += (
+            "\n\n## Auto-Approve Mode\n\n"
+            "auto_approve: true\n\n"
+            "At user approval gates (like gate_strategy), you act as the user:\n"
+            "1. Read the plan at .factory/strategy/current.md\n"
+            "2. Read the user's original intent at .factory/strategy/user-intent.md\n"
+            "3. Compare: does the plan match what the user asked for?\n"
+            "4. If YES: approve and proceed (say \"Approved\" and continue to the next step)\n"
+            "5. If NO: provide specific feedback about what's missing or wrong, then reloop\n\n"
+            "You are the CEO acting on behalf of the user. Apply judgment — approve good plans, "
+            "reject bad ones. Do NOT blindly approve everything. Do NOT wait for human input.\n"
         )
 
     if clean_pr:

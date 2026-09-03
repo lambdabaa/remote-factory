@@ -22,6 +22,7 @@ from factory.workflow.skill_export import (
     _fn_to_instruction,
     _fork_to_instruction,
     _gate_to_checkpoint,
+    _study_to_instruction,
     export_all_skills,
     validate_skill,
     workflow_to_skill_md,
@@ -151,7 +152,9 @@ class TestFnToInstruction:
         assert "<!-- node: FnNode id=fn_eval" in result
 
     def test_template_placeholder_gets_slot(self) -> None:
-        fn = FnNode(id="fn_finalize", command="factory review --verdict $VERDICT --project {project_path}")
+        fn = FnNode(
+            id="fn_finalize", command="factory review --verdict $VERDICT --project {project_path}"
+        )
         wf = _minimal_workflow(nodes={"fn_finalize": fn}, start="fn_finalize")
         result = _fn_to_instruction(fn, wf)
         assert "{{finalize_command_fn_finalize::" in result
@@ -175,7 +178,8 @@ class TestFnToInstruction:
         result = _fn_to_instruction(fn, wf)
         lines_before_bash = result.split("```bash")[0]
         non_annotation_lines = [
-            line for line in lines_before_bash.strip().split("\n")
+            line
+            for line in lines_before_bash.strip().split("\n")
             if line.strip() and not line.strip().startswith("<!--")
         ]
         assert non_annotation_lines == [], "Empty notes should produce no prose before bash block"
@@ -370,10 +374,10 @@ class TestGateToCheckpoint:
 
 class TestWorkflowToSkillMd:
     def test_generates_valid_frontmatter(self) -> None:
-        wf = _minimal_workflow(name="build")
+        wf = _minimal_workflow(name="alpha")
         result = workflow_to_skill_md(wf)
         assert result.startswith("---")
-        assert "name: workflow-build" in result
+        assert "name: workflow-alpha" in result
         assert "description:" in result
 
     def test_contains_arguments_placeholder(self) -> None:
@@ -420,8 +424,12 @@ class TestWorkflowToSkillMd:
         lines = result.split("\n")
         phase_lines = [line for line in lines if line.startswith("## Phase")]
         phase_titles = [line.lower() for line in phase_lines]
-        researcher_standalone = [t for t in phase_titles if "researcher" in t and "parallel" not in t]
-        assert len(researcher_standalone) == 0, "Fork targets should not appear as standalone phases"
+        researcher_standalone = [
+            t for t in phase_titles if "researcher" in t and "parallel" not in t
+        ]
+        assert len(researcher_standalone) == 0, (
+            "Fork targets should not appear as standalone phases"
+        )
 
     def test_study_node_generates_observe_phase(self) -> None:
         study = Study(
@@ -449,17 +457,17 @@ class TestExportAllSkills:
         assert "workflow-test_wf" in str(paths[0].parent)
 
     def test_creates_directory_structure(self, tmp_path: Path) -> None:
-        wf1 = _minimal_workflow(name="build")
-        wf2 = _minimal_workflow(name="improve")
-        paths = export_all_skills(tmp_path, workflows={"build": wf1, "improve": wf2})
+        wf1 = _minimal_workflow(name="alpha")
+        wf2 = _minimal_workflow(name="beta")
+        paths = export_all_skills(tmp_path, workflows={"alpha": wf1, "beta": wf2})
         assert len(paths) == 2
         dirs = {p.parent.name for p in paths}
-        assert "workflow-build" in dirs
-        assert "workflow-improve" in dirs
+        assert "workflow-alpha" in dirs
+        assert "workflow-beta" in dirs
 
     def test_written_content_passes_validation(self, tmp_path: Path) -> None:
-        wf = _minimal_workflow(name="build")
-        paths = export_all_skills(tmp_path, workflows={"build": wf})
+        wf = _minimal_workflow(name="alpha")
+        paths = export_all_skills(tmp_path, workflows={"alpha": wf})
         content = paths[0].read_text()
         issues = validate_skill(content)
         assert issues == [], f"Validation issues: {issues}"
@@ -471,10 +479,10 @@ class TestExportAllSkills:
 class TestValidateSkill:
     def test_valid_skill_no_issues(self) -> None:
         content = (
-            '---\nname: workflow-build\n'
+            "---\nname: workflow-build\n"
             'description: "Build things."\n'
-            'disable-model-invocation: true\n'
-            '---\n\n# Build\nDo stuff.\n'
+            "disable-model-invocation: true\n"
+            "---\n\n# Build\nDo stuff.\n"
         )
         assert validate_skill(content) == []
 
@@ -502,10 +510,10 @@ class TestValidateSkill:
         assert any("kebab" in i.lower() for i in issues)
 
     def test_oversized_body(self) -> None:
-        body = "\n".join(f"line {i}" for i in range(700))
+        body = "\n".join(f"line {i}" for i in range(1300))
         content = f'---\nname: workflow-test\ndescription: "x"\n---\n{body}'
         issues = validate_skill(content)
-        assert any("600" in i for i in issues)
+        assert any("1200" in i for i in issues)
 
 
 # ── real workflow skill generation ──────────────────────────────
@@ -513,36 +521,6 @@ class TestValidateSkill:
 
 class TestRealWorkflowSkills:
     """Tests that real workflow definitions produce valid, exportable skills."""
-
-    def test_discover_workflow_generates_valid_skill(self) -> None:
-        from factory.workflow.definitions import discover_workflow
-
-        wf = discover_workflow()
-        content = workflow_to_skill_md(wf)
-        issues = validate_skill(content)
-        assert issues == [], f"Validation issues: {issues}"
-        assert "workflow-discover" in content
-        assert "factory discover" in content
-
-    def test_review_workflow_generates_valid_skill(self) -> None:
-        from factory.workflow.definitions import review_workflow
-
-        wf = review_workflow()
-        content = workflow_to_skill_md(wf)
-        issues = validate_skill(content)
-        assert issues == [], f"Validation issues: {issues}"
-        assert "workflow-review" in content
-        assert "eval" in content.lower()
-
-    def test_refine_workflow_generates_valid_skill(self) -> None:
-        from factory.workflow.definitions import refine_workflow
-
-        wf = refine_workflow()
-        content = workflow_to_skill_md(wf)
-        issues = validate_skill(content)
-        assert issues == [], f"Validation issues: {issues}"
-        assert "workflow-refine" in content
-        assert "refiner" in content.lower()
 
     def test_all_registered_skills_exported(self, tmp_path: Path) -> None:
         from factory.workflow.definitions import register_all
@@ -575,13 +553,9 @@ def _workflows_with_builder() -> list[str]:
         if wf.terminal:
             continue
         has_builder = any(
-            isinstance(n, AgentNode) and n.role == AgentRole.BUILDER
-            for n in wf.nodes.values()
+            isinstance(n, AgentNode) and n.role == AgentRole.BUILDER for n in wf.nodes.values()
         )
-        has_subgraph_fork = any(
-            isinstance(n, SubgraphForkNode)
-            for n in wf.nodes.values()
-        )
+        has_subgraph_fork = any(isinstance(n, SubgraphForkNode) for n in wf.nodes.values())
         if has_builder and not has_subgraph_fork:
             names.append(name)
     return sorted(names)
@@ -602,3 +576,29 @@ class TestSkillQaEnforcement:
             f"workflow-{workflow_name} SKILL.md is missing any QA agent invocation "
             f"(health_checker, code_reviewer, or adversarial_tester)"
         )
+
+
+# ── _study_to_instruction focus threading ──────────────────────
+
+
+class TestStudyToInstructionFocus:
+    def test_with_focus(self) -> None:
+        study = Study(
+            id="study",
+            command="factory study {project_path}",
+            focus="auth",
+        )
+        wf = _minimal_workflow(nodes={"study": study}, start="study")
+        result = _study_to_instruction(study, wf)
+        assert '--focus "auth"' in result
+
+    def test_without_focus_has_ceo_hint(self) -> None:
+        study = Study(
+            id="study",
+            command="factory study {project_path}",
+        )
+        wf = _minimal_workflow(nodes={"study": study}, start="study")
+        result = _study_to_instruction(study, wf)
+        assert '--focus "auth"' not in result
+        assert "focus directive" in result
+        assert '--focus "<your focus topic>"' in result

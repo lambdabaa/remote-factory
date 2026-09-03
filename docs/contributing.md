@@ -39,6 +39,11 @@ uv run mypy factory/              # Type check
 - **Structured logging** via `structlog` — use `log = structlog.get_logger()` at module level
 - **No comments** unless the "why" is non-obvious
 
+## README
+
+`README.md` is a symlink to `docs/index.md` — edit `docs/index.md` directly.
+Do not break this symlink or create a separate `README.md` file.
+
 ## PR Workflow
 
 1. Create a feature branch from `main`
@@ -86,7 +91,7 @@ factory ceo ~/remote-factory --focus "shell completions for re:factory CLI"
 
 | Idea | Description |
 |------|-------------|
-| **Multi-backend support** | Extend re:factory to work with other AI code agents — [Codex](https://openai.com/index/codex/), [Jules](https://jules.google.com/), [Amp](https://ampcode.com/), or any agent that accepts a prompt and produces code changes |
+| **Multi-backend support** | Extend re:factory to work with other AI code agents — [Jules](https://jules.google.com/), [Amp](https://ampcode.com/), or any agent that accepts a prompt and produces code changes |
 | **Distributed execution** | Run specialist agents across multiple machines with a message queue (Redis, NATS) instead of local subprocesses |
 | **Learning-to-search** | Use experiment history to train a lightweight model that predicts which hypothesis categories will succeed for a given project state |
 | **Multi-project orchestration** | A meta-CEO that manages a portfolio of projects, allocating re:factory cycles based on expected improvement |
@@ -119,7 +124,16 @@ factory/
 ├── dashboard/              # FastAPI live dashboard
 ├── discovery/              # Project introspection
 ├── eval/                   # Three-tier eval system
-└── notify/                 # Telegram notifications
+├── notify/                 # Telegram notifications
+├── outer_loop/             # MAP-Elites evolutionary workflow search
+│   ├── engine.py           # SwarmEngine orchestrator
+│   ├── mutations.py        # 8 mutation operators (incl. KNOB_MUTATE)
+│   └── ...
+└── workflow/
+    ├── primitives.py       # Node types, Edge, Workflow
+    ├── package.py          # Package ecosystem: composition operators
+    ├── executor.py         # WorkflowExecutor (async DAG walker)
+    └── ...
 
 tests/                      # 3000+ tests mirroring factory/ structure
 ```

@@ -73,6 +73,11 @@ def _parse_usage(data: dict) -> AgentUsage:
     )
 
 
+def _claude_bin() -> str:
+    """Return the Claude CLI binary name, respecting FACTORY_CLAUDE_BIN override."""
+    return os.environ.get("FACTORY_CLAUDE_BIN") or "claude"
+
+
 class ClaudeRunner:
     """Runner implementation for Claude Code CLI."""
 
@@ -85,7 +90,7 @@ class ClaudeRunner:
         return RunnerMeta(
             name="claude",
             display_name="Claude Code",
-            binary="claude",
+            binary=_claude_bin(),
             install_hint="npm install -g @anthropic-ai/claude-code",
             supports_usage_telemetry=True,
             supports_session_name=True,
@@ -108,7 +113,7 @@ class ClaudeRunner:
         prompt_path = Path(prompt_file.name)
 
         cmd = [
-            "claude",
+            _claude_bin(),
             "--append-system-prompt-file",
             prompt_file.name,
             "-p",
@@ -116,6 +121,7 @@ class ClaudeRunner:
             "--output-format",
             "stream-json",
             "--verbose",
+            "--bare",
             "--disallowedTools",
             "Agent",
         ]
@@ -134,6 +140,12 @@ class ClaudeRunner:
             cmd.extend(["--session-id", request.session_id])
 
         env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+        if request.cwd:
+            from factory.worktree import is_factory_venv
+            if is_factory_venv(Path(request.cwd)):
+                venv_path = Path(request.cwd) / ".venv"
+                env["VIRTUAL_ENV"] = str(venv_path)
+                env["PATH"] = str(venv_path / "bin") + os.pathsep + env.get("PATH", "")
         if request.model:
             env["FACTORY_MODEL"] = request.model
         if request.cwd:
@@ -258,15 +270,23 @@ class ClaudeRunner:
 
         temp_files: list[Path] = [prompt_path]
 
-        # Write CEO prompt to .claude/CLAUDE.md so it survives session transitions
-        # (background via ←, resume, daemon restart). The system prompt file is
-        # authoritative when present; CLAUDE.md provides resilience when it's not.
+        # Write a slim CEO identity to .claude/CLAUDE.md so it survives session
+        # transitions (background via ←, resume, daemon restart). The full prompt
+        # is delivered via --append-system-prompt-file; CLAUDE.md only needs enough
+        # to re-orient the CEO on resume.
         cwd = Path(request.cwd)
         claude_dir = cwd / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
 
         claude_md_path = claude_dir / "CLAUDE.md"
-        claude_md_path.write_text(request.prompt)
+        backup_path = claude_dir / "CLAUDE.md.factory-backup"
+        if claude_md_path.exists():
+            import shutil
+
+            shutil.copy2(claude_md_path, backup_path)
+
+        claude_md_content = request.prompt_core if request.prompt_core else request.prompt
+        claude_md_path.write_text(claude_md_content)
         temp_files.append(claude_md_path)
 
         # Write disallowedTools to settings.local.json so it survives session
@@ -283,9 +303,10 @@ class ClaudeRunner:
         temp_files.append(settings_path)
 
         cmd = [
-            "claude",
+            _claude_bin(),
             "--append-system-prompt-file",
             prompt_file.name,
+            "--bare",
         ]
         settings_file = request.extras.get("settings_file")
         if settings_file:
@@ -303,6 +324,12 @@ class ClaudeRunner:
             cmd.extend(["--session-id", request.session_id])
 
         env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+        if request.cwd:
+            from factory.worktree import is_factory_venv
+            if is_factory_venv(Path(request.cwd)):
+                venv_path = Path(request.cwd) / ".venv"
+                env["VIRTUAL_ENV"] = str(venv_path)
+                env["PATH"] = str(venv_path / "bin") + os.pathsep + env.get("PATH", "")
         if request.model:
             env["FACTORY_MODEL"] = request.model
         if request.cwd:
@@ -315,10 +342,21 @@ class ClaudeRunner:
         cmd, env, temp_files = self.build_interactive_command(request)
         if not env.get("FACTORY_TRACE_ID"):
             env["TELEMETRY_PLATFORM"] = ""
+        cwd = Path(request.cwd)
+        backup_path = cwd / ".claude" / "CLAUDE.md.factory-backup"
+        claude_md_path = cwd / ".claude" / "CLAUDE.md"
         try:
             log.info("claude_interactive", cwd=str(request.cwd))
             result = subprocess.run(cmd, cwd=request.cwd, env=env)
             return result.returncode
         finally:
             for f in temp_files:
+                if f == claude_md_path:
+                    continue
                 f.unlink(missing_ok=True)
+            if backup_path.exists():
+                import shutil
+
+                shutil.move(str(backup_path), str(claude_md_path))
+            else:
+                claude_md_path.unlink(missing_ok=True)

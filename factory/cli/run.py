@@ -1,4 +1,5 @@
 """Factory run command — single-shot and heartbeat loop execution."""
+
 from __future__ import annotations
 
 import argparse
@@ -14,6 +15,7 @@ from pathlib import Path
 import structlog
 
 from factory.cli._helpers import (
+    DESIGN_MODES,
     _emit_cli_event,
     _ensure_dashboard,
     _print_banner,
@@ -77,6 +79,7 @@ def _run_single_cycle(
     run_id: str | None = None,
     no_worktree: bool = False,
     overwrite: str | None = None,
+    auto_approve: bool = False,
 ) -> int:
     """Execute a single factory run cycle via the CEO agent. Returns 0 on success, 1 on error."""
     from factory.agents.runner import invoke_agent
@@ -130,6 +133,7 @@ def _run_single_cycle(
             issue_numbers=issue_numbers,
             issue_urls=issue_urls,
             clean_pr=clean_pr,
+            auto_approve=auto_approve,
         )
 
         result, code = _run(
@@ -159,78 +163,6 @@ def _run_single_cycle(
             remove_worktree(project_path, wt_path, wt_branch)
 
 
-def _chain_modes(
-    project_path: Path,
-    focus: str | None = None,
-    min_growth: int | None = None,
-    max_new: int | None = None,
-    branch: str | None = None,
-    already_improved: bool = False,
-    max_chains: int = 3,
-    model: str | None = None,
-    no_github: bool = False,
-    use_profile: bool = False,
-    tmux_persist: bool = False,
-    background: bool = False,
-    completed_mode: str | None = None,
-    no_worktree: bool = False,
-) -> int:
-    """After a cycle completes, re-detect state and chain into the next mode.
-
-    This ensures builds and discoveries flow through the full pipeline
-    automatically — Build → Discover → Review → Improve — without manual
-    re-invocation. Returns 0 when one Improve cycle completes (or all
-    chains are exhausted).
-
-    If *completed_mode* names a terminal workflow, returns 0 immediately
-    without chaining.
-    """
-    from factory.models import ProjectState
-    from factory.state import detect_state
-
-    if completed_mode:
-        from factory.workflow.registry import WorkflowRegistry
-
-        wf = WorkflowRegistry.get_workflow(completed_mode, project_path)
-        if wf and wf.terminal:
-            print(
-                f"[factory] Terminal mode completed: {completed_mode} "
-                "— skipping post-completion chaining",
-                file=sys.stderr,
-            )
-            return 0
-
-    for i in range(max_chains):
-        state = detect_state(project_path)
-        if state == ProjectState.HAS_FACTORY and already_improved:
-            return 0
-        next_mode = _auto_detect_mode(project_path)
-        if next_mode == "improve":
-            already_improved = True
-        print(
-            f"[factory] Chaining: state={state.value} → mode={next_mode} "
-            f"(chain {i + 1}/{max_chains})",
-            file=sys.stderr,
-        )
-        code = _run_single_cycle(
-            project_path,
-            next_mode,
-            focus=focus,
-            min_growth=min_growth,
-            max_new=max_new,
-            branch=branch,
-            no_github=no_github,
-            model=model,
-            use_profile=use_profile,
-            tmux_persist=tmux_persist,
-            background=background,
-            no_worktree=no_worktree,
-        )
-        if code != 0:
-            return code
-    return 0
-
-
 def _run_heartbeat_loop(
     project_path: Path,
     mode: str,
@@ -250,11 +182,9 @@ def _run_heartbeat_loop(
     background: bool,
     run_id: str | None,
     budget_kwargs: dict,
-    skip_improve: bool,
     interval: int,
     max_cycles: int | None,
     no_worktree: bool = False,
-    completed_mode: str | None = None,
 ) -> int:
     """Continuous heartbeat loop with signal handling."""
     shutdown_event = threading.Event()
@@ -296,21 +226,6 @@ def _run_heartbeat_loop(
                 no_worktree=no_worktree,
                 **budget_kwargs,
             )
-            _chain_modes(
-                project_path,
-                focus=focus,
-                already_improved=skip_improve,
-                min_growth=budget_kwargs.get("min_growth"),
-                max_new=budget_kwargs.get("max_new"),
-                branch=budget_kwargs.get("branch"),
-                model=model,
-                no_github=no_github,
-                use_profile=use_profile_flag,
-                tmux_persist=tmux_persist,
-                background=background,
-                completed_mode=completed_mode or mode,
-                no_worktree=no_worktree,
-            )
             _emit_cli_event(project_path, "cycle.completed", {"cycle": cycle, "mode": mode})
 
             mode = _auto_detect_mode(project_path, has_prompt=bool(prompt_file or context))
@@ -332,10 +247,7 @@ def _run_heartbeat_loop(
         signal.signal(signal.SIGINT, old_sigint)
 
     elapsed = time.monotonic() - start_time
-    print(
-        f"[factory] Shutting down gracefully after {cycle} cycles."
-        f" Total runtime: {elapsed:.0f}s"
-    )
+    print(f"[factory] Shutting down gracefully after {cycle} cycles. Total runtime: {elapsed:.0f}s")
     return 0
 
 
@@ -407,8 +319,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     mode = getattr(args, "mode", "auto")
     warn_deprecated_mode(mode)
     auto_approve: bool = getattr(args, "auto_approve", False)
-    if auto_approve and mode != "design":
-        print("Error: --auto-approve only applies to --mode design", file=sys.stderr)
+    if auto_approve and mode not in DESIGN_MODES:
+        print("Error: --auto-approve only applies to --mode design or design-v2", file=sys.stderr)
         return 1
     force_fresh = mode == "auto-fresh"
     if mode in ("auto", "auto-fresh"):
@@ -432,9 +344,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if focus and mode not in ("improve", "research"):
+    if focus and mode not in (*DESIGN_MODES, "research"):
         print(
-            f"Error: --focus (targeted mode) only works in improve or research mode, got '{mode}'. "
+            f"Error: --focus (targeted mode) only works in design or research mode, got '{mode}'. "
             "The project must already be built before targeting specific items.",
             file=sys.stderr,
         )
@@ -457,7 +369,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  Cleaned {len(pruned)} stale worktree(s)", file=sys.stderr)
 
     budget_kwargs = dict(min_growth=min_growth, max_new=max_new, branch=branch)
-    skip_improve = mode in ("improve", "meta") or discover_only
 
     overwrite = getattr(args, "overwrite", None)
 
@@ -482,25 +393,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             run_id=run_id,
             no_worktree=no_worktree,
             overwrite=overwrite,
+            auto_approve=auto_approve,
             **budget_kwargs,
         )
-        if code != 0:
-            return code
-        return _chain_modes(
-            project_path,
-            focus=focus,
-            already_improved=skip_improve,
-            min_growth=min_growth,
-            max_new=max_new,
-            branch=branch,
-            model=model,
-            no_github=no_github,
-            use_profile=use_profile_flag,
-            tmux_persist=tmux_persist,
-            background=background,
-            completed_mode=mode,
-            no_worktree=no_worktree,
-        )
+        return code
 
     interval: int = getattr(args, "interval", 1800)
     max_cycles: int | None = getattr(args, "max_cycles", None)
@@ -523,9 +419,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         background=background,
         run_id=run_id,
         budget_kwargs=budget_kwargs,
-        skip_improve=skip_improve,
         interval=interval,
         max_cycles=max_cycles,
         no_worktree=no_worktree,
-        completed_mode=mode,
     )

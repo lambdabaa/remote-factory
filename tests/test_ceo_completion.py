@@ -19,13 +19,13 @@ class TestCycleState:
             write_cycle_state,
         )
 
-        state = create_cycle_state("build", "Build a CLI tool")
+        state = create_cycle_state("design", "Build a CLI tool")
         write_cycle_state(tmp_path, state)
 
         loaded = read_cycle_state(tmp_path)
         assert loaded is not None
         assert loaded.cycle_id == state.cycle_id
-        assert loaded.mode == "build"
+        assert loaded.mode == "design"
         assert loaded.initial_prompt == "Build a CLI tool"
         assert loaded.respawns == 0
 
@@ -44,7 +44,7 @@ class TestCycleState:
             write_cycle_state,
         )
 
-        state = create_cycle_state("improve")
+        state = create_cycle_state("design")
         write_cycle_state(tmp_path, state)
         assert read_cycle_state(tmp_path) is not None
 
@@ -73,7 +73,7 @@ class TestCycleState:
         state_data = {
             "cycle_id": "old123",
             "started_at": old_time.isoformat(),
-            "mode": "build",
+            "mode": "design",
             "initial_prompt": "",
             "respawns": 5,
         }
@@ -98,7 +98,7 @@ class TestCycleState:
         from factory.ceo_completion import create_cycle_state, write_cycle_state, read_cycle_state
 
         long_prompt = "x" * 5000
-        state = create_cycle_state("build", long_prompt)
+        state = create_cycle_state("design", long_prompt)
         write_cycle_state(tmp_path, state)
 
         loaded = read_cycle_state(tmp_path)
@@ -110,15 +110,7 @@ class TestBudgetAllowsRespawn:
     """Tests for _budget_allows_respawn().
 
     With only per-cycle limits (no daily/session limit), respawn is always allowed.
-    Per-cycle limits are enforced within BobRunner during execution.
     """
-
-    def test_bob_always_allowed(self, tmp_path: Path) -> None:
-        from factory.ceo_completion import _budget_allows_respawn
-
-        (tmp_path / ".factory").mkdir()
-        # Always returns True - per-cycle limits are enforced within BobRunner
-        assert _budget_allows_respawn("bob", tmp_path) is True
 
     def test_claude_always_allowed(self, tmp_path: Path) -> None:
         from factory.ceo_completion import _budget_allows_respawn
@@ -130,15 +122,15 @@ class TestBudgetAllowsRespawn:
 class TestDetectIncomplete:
     """Tests for _detect_incomplete()."""
 
-    def test_build_incomplete_no_eval_profile(self, tmp_path: Path) -> None:
+    def test_design_incomplete_no_eval_profile(self, tmp_path: Path) -> None:
         """Build mode without strategy needs eval profile."""
         from factory.ceo_completion import _detect_incomplete
 
         (tmp_path / ".factory").mkdir()
 
-        gap = _detect_incomplete(tmp_path, "build")
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is not None
-        assert gap.mode == "build"
+        assert gap.mode == "design"
         assert gap.next_item == "discovery"
         assert "no eval profile" in gap.reason
 
@@ -159,10 +151,10 @@ class TestDetectIncomplete:
             exp_dir.mkdir(parents=True)
             (exp_dir / "verdict.json").write_text('{"verdict": "keep"}')
 
-        gap = _detect_incomplete(tmp_path, "improve")
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is None
 
-    def test_improve_incomplete_when_missing_verdicts(self, tmp_path: Path) -> None:
+    def test_design_incomplete_when_missing_verdicts(self, tmp_path: Path) -> None:
         """Improve mode is incomplete when verdict count < hypothesis count."""
         from factory.ceo_completion import _detect_incomplete
 
@@ -178,20 +170,32 @@ class TestDetectIncomplete:
         exp_dir.mkdir(parents=True)
         (exp_dir / "verdict.json").write_text('{"verdict": "keep"}')
 
-        gap = _detect_incomplete(tmp_path, "improve")
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is not None
         assert gap.planned == 3
         assert gap.completed == 1
         assert gap.next_item == "H2"
-        assert "improve.incomplete" in gap.reason
+        assert "design.incomplete" in gap.reason
 
-    def test_improve_no_strategy_returns_none(self, tmp_path: Path) -> None:
-        """No strategy file means nothing planned — not incomplete."""
+    def test_design_no_strategy_no_eval_profile_returns_gap(self, tmp_path: Path) -> None:
+        """No strategy + no eval profile means discovery is needed."""
         from factory.ceo_completion import _detect_incomplete
 
         (tmp_path / ".factory").mkdir()
 
-        gap = _detect_incomplete(tmp_path, "improve")
+        gap = _detect_incomplete(tmp_path, "design")
+        assert gap is not None
+        assert "no eval profile" in gap.reason
+
+    def test_design_no_strategy_with_eval_profile_returns_none(self, tmp_path: Path) -> None:
+        """No strategy but eval profile exists means nothing planned — not incomplete."""
+        from factory.ceo_completion import _detect_incomplete
+
+        factory_dir = tmp_path / ".factory"
+        factory_dir.mkdir()
+        (factory_dir / "eval_profile.json").write_text('{"dimensions": []}')
+
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is None
 
     def test_discover_complete_when_profile_exists(self, tmp_path: Path) -> None:
@@ -202,19 +206,19 @@ class TestDetectIncomplete:
         factory_dir.mkdir()
         (factory_dir / "eval_profile.json").write_text('{"dimensions": []}')
 
-        gap = _detect_incomplete(tmp_path, "discover")
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is None
 
-    def test_discover_incomplete_when_no_profile(self, tmp_path: Path) -> None:
-        """Discover mode is incomplete without eval_profile.json."""
+    def test_design_incomplete_when_no_eval_profile_discover(self, tmp_path: Path) -> None:
+        """Design mode is incomplete without eval_profile.json when no hypotheses exist."""
         from factory.ceo_completion import _detect_incomplete
 
         (tmp_path / ".factory").mkdir()
 
-        gap = _detect_incomplete(tmp_path, "discover")
+        gap = _detect_incomplete(tmp_path, "design")
         assert gap is not None
-        assert gap.mode == "discover"
-        assert "no eval_profile.json" in gap.reason
+        assert gap.mode == "design"
+        assert "no eval profile" in gap.reason
 
 
 class TestCountVerdictsWithResultsTsv:
@@ -398,7 +402,7 @@ class TestDetectIncompleteWithTimestampFiltering:
 
         # Current cycle started at 10:00 on Apr 29 — only 1 verdict should count
         cycle_start = datetime(2026, 4, 29, 10, 0, 0, tzinfo=timezone.utc)
-        gap = _detect_incomplete(tmp_path, "improve", cycle_started_at=cycle_start)
+        gap = _detect_incomplete(tmp_path, "design", cycle_started_at=cycle_start)
 
         # Should be incomplete: 2 hypotheses, only 1 current-cycle verdict
         assert gap is not None
@@ -428,7 +432,7 @@ class TestDetectIncompleteWithTimestampFiltering:
         )
 
         cycle_start = datetime(2026, 4, 29, 10, 0, 0, tzinfo=timezone.utc)
-        gap = _detect_incomplete(tmp_path, "improve", cycle_started_at=cycle_start)
+        gap = _detect_incomplete(tmp_path, "design", cycle_started_at=cycle_start)
 
         # Should be complete: 2 hypotheses, 2 current-cycle verdicts
         assert gap is None
@@ -455,13 +459,13 @@ class TestDetectIncompleteWithTimestampFiltering:
         )
 
         cycle_start = datetime(2026, 4, 29, 10, 0, 0, tzinfo=timezone.utc)
-        gap = _detect_incomplete(tmp_path, "build", cycle_started_at=cycle_start)
+        gap = _detect_incomplete(tmp_path, "design", cycle_started_at=cycle_start)
 
         # Should be incomplete: 3 phases, only 1 current-cycle verdict
         assert gap is not None
         assert gap.planned == 3
         assert gap.completed == 1
-        assert gap.next_item == "Phase2"
+        assert gap.next_item == "H2"
 
 
 class TestDetectIncompleteResearchMode:
@@ -525,15 +529,15 @@ class TestBuildContinuationTask:
         from factory.ceo_completion import _build_continuation_task, IncompleteGap
 
         gap = IncompleteGap(
-            mode="improve",
+            mode="design",
             planned=5,
             completed=2,
             next_item="H3",
-            reason="improve.incomplete",
+            reason="design.incomplete",
         )
 
         task = _build_continuation_task(gap)
-        assert "Resume execution from hypothesis H3" in task
+        assert "Resume execution from H3" in task
         assert "do not re-plan" in task
         assert "Spawn Builder for H3" in task
         assert "2/5" in task
@@ -543,31 +547,31 @@ class TestBuildContinuationTask:
         from factory.ceo_completion import _build_continuation_task, IncompleteGap
 
         gap = IncompleteGap(
-            mode="discover",
+            mode="design",
             planned=1,
             completed=0,
             next_item="eval_profile",
-            reason="discover.incomplete",
+            reason="design.incomplete",
         )
 
         task = _build_continuation_task(gap)
-        assert "Resume Discovery" in task or "discover" in task.lower()
+        assert "design" in task.lower()
 
-    def test_build_continuation(self) -> None:
-        """Build mode continuation tells CEO to resume from next phase."""
+    def test_design_continuation_with_phases(self) -> None:
+        """Design mode continuation tells CEO to resume from next hypothesis."""
         from factory.ceo_completion import _build_continuation_task, IncompleteGap
 
         gap = IncompleteGap(
-            mode="build",
+            mode="design",
             planned=6,
             completed=3,
-            next_item="Phase4",
-            reason="build.incomplete",
+            next_item="H4",
+            reason="design.incomplete",
         )
 
         task = _build_continuation_task(gap)
-        assert "Resume Build pipeline" in task
-        assert "Phase4" in task
+        assert "Resume execution from H4" in task
+        assert "3/6" in task
 
     def test_research_continuation(self) -> None:
         """Research mode continuation tells CEO to spawn Builder for next H."""
@@ -597,18 +601,18 @@ class TestBuildContinuationTask:
         )
 
         gap = IncompleteGap(
-            mode="build",
+            mode="design",
             planned=6,
             completed=3,
             next_item="Phase4",
-            reason="build.incomplete",
+            reason="design.incomplete",
         )
-        cycle_state = create_cycle_state("build", "Build a CLI")
+        cycle_state = create_cycle_state("design", "Build a CLI")
 
         task = _build_continuation_task(gap, cycle_state)
         assert "## CRITICAL: Mode Override" in task
         assert "CONTINUATION" in task
-        assert "BUILD" in task
+        assert "DESIGN" in task
         assert "Do NOT re-detect mode" in task
         assert cycle_state.cycle_id in task
 
@@ -643,7 +647,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -692,7 +696,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -724,7 +728,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -753,7 +757,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -782,7 +786,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
                 max_respawns=2,  # Low cap for test
             )
@@ -817,7 +821,7 @@ class TestRunCeoWithCompletionGuard:
             result, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -845,7 +849,7 @@ class TestRunCeoWithCompletionGuard:
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Build task",
-                mode="build",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -879,7 +883,7 @@ class TestRunCeoWithCompletionGuard:
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Improve task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -927,13 +931,13 @@ class TestRunCeoWithCompletionGuard:
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Build task",
-                mode="build",  # Start in build mode
+                mode="design",  # Start in design mode
                 runner_name="claude",
             )
 
         assert call_count == 2
         # Both invocations should see the same mode
-        assert all(m == "build" for m in observed_modes)
+        assert all(m == "design" for m in observed_modes)
 
     async def test_respawn_increments_counter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -968,7 +972,7 @@ class TestRunCeoWithCompletionGuard:
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Improve task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -1009,7 +1013,7 @@ class TestRunCeoWithCompletionGuard:
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -1020,7 +1024,7 @@ class TestRunCeoWithCompletionGuard:
         assert len(respawn_events) == 1
         assert "cycle_id" in respawn_events[0]["data"]
         assert "mode" in respawn_events[0]["data"]
-        assert respawn_events[0]["data"]["mode"] == "improve"
+        assert respawn_events[0]["data"]["mode"] == "design"
 
 
 class TestAutoDetectModeWithCycle:
@@ -1035,12 +1039,12 @@ class TestAutoDetectModeWithCycle:
         (tmp_path / ".git").mkdir()
 
         # Write in-flight cycle state for build mode
-        state = create_cycle_state("build", "Initial task")
+        state = create_cycle_state("design", "Initial task")
         write_cycle_state(tmp_path, state)
 
         # Even though project has no factory, should return build (from cycle)
         mode = _auto_detect_mode(tmp_path, has_prompt=False)
-        assert mode == "build"
+        assert mode == "design"
 
     def test_ignores_cycle_when_force_fresh(self, tmp_path: Path) -> None:
         """_auto_detect_mode ignores cycle.json when force_fresh=True."""
@@ -1051,12 +1055,12 @@ class TestAutoDetectModeWithCycle:
         (tmp_path / ".git").mkdir()
 
         # Write in-flight cycle state for build mode
-        state = create_cycle_state("build", "Initial task")
+        state = create_cycle_state("design", "Initial task")
         write_cycle_state(tmp_path, state)
 
-        # With force_fresh, should detect from state (no_factory → discover)
+        # With force_fresh, should detect from state (no_factory → design)
         mode = _auto_detect_mode(tmp_path, has_prompt=False, force_fresh=True)
-        assert mode == "discover"
+        assert mode == "design"
 
     def test_detects_normally_when_no_cycle(self, tmp_path: Path) -> None:
         """_auto_detect_mode detects from project state when no cycle.json."""
@@ -1067,7 +1071,7 @@ class TestAutoDetectModeWithCycle:
 
         # No cycle state exists
         mode = _auto_detect_mode(tmp_path, has_prompt=False)
-        assert mode == "discover"  # no_factory state
+        assert mode == "design"  # no_factory state → design
 
     def test_detects_normally_when_cycle_stale(self, tmp_path: Path) -> None:
         """_auto_detect_mode ignores stale cycle.json."""
@@ -1084,7 +1088,7 @@ class TestAutoDetectModeWithCycle:
         state_data = {
             "cycle_id": "old123",
             "started_at": old_time.isoformat(),
-            "mode": "build",
+            "mode": "design",
             "initial_prompt": "",
             "respawns": 0,
         }
@@ -1092,15 +1096,11 @@ class TestAutoDetectModeWithCycle:
 
         # Should ignore stale cycle and detect from state
         mode = _auto_detect_mode(tmp_path, has_prompt=False)
-        assert mode == "discover"  # no_factory state
+        assert mode == "design"  # no_factory state → design
 
 
-class TestCeoPromptResearchMode:
-    """Tests for research mode content — split between CEO prompt and workflow skills.
-
-    Mode-specific phases now live in generated SKILL.md files under skills/.
-    The CEO prompt retains routing, Sacred Rules, and cross-cutting protocols.
-    """
+class TestCeoPromptCrossCutting:
+    """Tests for CEO prompt cross-cutting content."""
 
     @pytest.fixture()
     def ceo_prompt(self) -> str:
@@ -1108,33 +1108,9 @@ class TestCeoPromptResearchMode:
         prompt_path = Path(__file__).parent.parent / "factory" / "agents" / "prompts" / "ceo.md"
         return prompt_path.read_text()
 
-    @pytest.fixture()
-    def research_skill(self) -> str:
-        """Generate the research workflow skill content programmatically."""
-        from factory.workflow.definitions import register_all
-        from factory.workflow.skill_export import workflow_to_skill_md
-        from factory.workflow.splitter import resolve_to_clean
-
-        wfs = register_all()
-        return resolve_to_clean(workflow_to_skill_md(wfs["research"]))
-
-    def test_research_mode_section_exists(self, ceo_prompt: str) -> None:
-        """CEO prompt routes to research skill via Skill Selection."""
-        assert "workflow-research" in ceo_prompt
-
-    def test_all_seven_phases_present(self, research_skill: str) -> None:
-        """Research skill contains phases for the research workflow."""
-        assert "Phase" in research_skill
-        assert "factory agent" in research_skill
-
-    def test_researcher_phase_in_research_mode(self, research_skill: str) -> None:
-        """Research skill includes researcher agent invocation."""
-        assert "researcher" in research_skill
-
-    def test_references_research_infrastructure(self, ceo_prompt: str, research_skill: str) -> None:
-        """CEO or research skill references research_target config."""
-        combined = ceo_prompt + research_skill
-        assert "research_target" in combined or "research" in combined.lower()
+    def test_design_mode_routing(self, ceo_prompt: str) -> None:
+        """CEO prompt routes to design skill."""
+        assert "workflow-design" in ceo_prompt
 
     def test_mutable_fixed_surfaces_enforced(self, ceo_prompt: str) -> None:
         """CEO prompt mentions scope constraints in Sacred Rules."""
@@ -1145,76 +1121,10 @@ class TestCeoPromptResearchMode:
         assert "hygiene" in ceo_prompt.lower()
         assert "growth" in ceo_prompt.lower()
 
-    def test_monotonic_improvement_policy(self, research_skill: str) -> None:
-        """Research skill or definitions reference monotonic improvement."""
-        from factory.workflow.definitions import register_all
-
-        wfs = register_all()
-        research_wf = wfs["research"]
-        node_prompts = " ".join(
-            n.prompt_template
-            for n in research_wf.nodes.values()
-            if hasattr(n, "prompt_template") and n.prompt_template
-        )
-        assert "previous" in node_prompts.lower() or "baseline" in node_prompts.lower()
-
-    def test_termination_conditions(self, research_skill: str) -> None:
-        """Research workflow has evaluator and gate nodes for verdict."""
-        from factory.workflow.definitions import register_all
-
-        wfs = register_all()
-        research_wf = wfs["research"]
-        gate_ids = [nid for nid, n in research_wf.nodes.items() if hasattr(n, "evaluator_type")]
-        assert len(gate_ids) > 0, "Research workflow must have gate nodes"
-
     def test_hygiene_regression_gate(self, ceo_prompt: str) -> None:
         """CEO prompt requires eval score checks before keeping changes."""
         assert "eval" in ceo_prompt.lower()
         assert "revert" in ceo_prompt.lower()
-
-    def test_research_mode_in_cycle_completion(self, ceo_prompt: str) -> None:
-        """Research mode is listed in the cycle completion rules."""
-        assert "Research mode" in ceo_prompt
-        completion_idx = ceo_prompt.index("Cycle Completion")
-        state_machine_idx = ceo_prompt.index("## State Machine")
-        completion_section = ceo_prompt[completion_idx:state_machine_idx]
-        assert "Research mode" in completion_section
-
-    def test_leakage_guards_in_research_mode(self, research_skill: str) -> None:
-        """Research workflow includes leakage-related concepts."""
-        from factory.workflow.definitions import register_all
-
-        wfs = register_all()
-        research_wf = wfs["research"]
-        gate_prompts = " ".join(
-            n.gate_prompt
-            for n in research_wf.nodes.values()
-            if hasattr(n, "gate_prompt") and n.gate_prompt
-        )
-        node_prompts = " ".join(
-            n.prompt_template
-            for n in research_wf.nodes.values()
-            if hasattr(n, "prompt_template") and n.prompt_template
-        )
-        combined = gate_prompts + node_prompts
-        assert "surface" in combined.lower() or "constraint" in combined.lower()
-
-    def test_research_ideation_plan_loop_activation(self, ceo_prompt: str) -> None:
-        """CEO routes to research skill when research_target is configured."""
-        assert "research" in ceo_prompt.lower()
-
-    def test_research_ideation_strategist_instruction(self, research_skill: str) -> None:
-        """Research skill includes strategist agent invocation."""
-        assert "strategist" in research_skill.lower()
-
-    def test_review_mode_populates_research_config(self, ceo_prompt: str) -> None:
-        """CEO prompt references research mode routing for configured projects."""
-        assert "research_target" in ceo_prompt or "research" in ceo_prompt.lower()
-
-    def test_review_mode_transitions_to_research(self, ceo_prompt: str) -> None:
-        """CEO Skill Selection routes to research skill when configured."""
-        assert "workflow-research" in ceo_prompt
-
 
 class TestCeoCompletionBackgroundBypass:
     """Tests for background=True bypassing the respawn loop."""
@@ -1233,7 +1143,7 @@ class TestCeoCompletionBackgroundBypass:
             stdout, code = await run_ceo_with_completion_guard(
                 tmp_path,
                 "initial task",
-                mode="improve",
+                mode="design",
                 background=True,
             )
 
@@ -1253,7 +1163,7 @@ class TestPrintResumeHint:
         """Resume hint is printed to stderr when session.json exists."""
         from factory.ceo_completion import print_resume_hint, write_ceo_session_id
 
-        write_ceo_session_id(tmp_path, "abc-123", mode="improve")
+        write_ceo_session_id(tmp_path, "abc-123", mode="design")
         print_resume_hint(tmp_path)
 
         captured = capsys.readouterr()
@@ -1270,7 +1180,7 @@ class TestPrintResumeHint:
             write_ceo_session_id,
         )
 
-        write_ceo_session_id(tmp_path, "abc-123", mode="improve")
+        write_ceo_session_id(tmp_path, "abc-123", mode="design")
         delete_cycle_state(tmp_path)
         print_resume_hint(tmp_path)
 
@@ -1308,14 +1218,14 @@ class TestResumeHintInCompletionGuard:
         (strategy_dir / "current.md").write_text("#### H1: A\n")
         (tmp_path / ".factory" / "experiments").mkdir()
 
-        write_ceo_session_id(tmp_path, "test-session-id", mode="improve")
+        write_ceo_session_id(tmp_path, "test-session-id", mode="design")
         mock_invoke = AsyncMock(return_value=("Incomplete", 0))
 
         with patch("factory.agents.runner.invoke_agent", mock_invoke):
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
                 max_respawns=0,
             )
@@ -1337,14 +1247,14 @@ class TestResumeHintInCompletionGuard:
         exp_dir.mkdir(parents=True)
         (exp_dir / "verdict.json").write_text('{"verdict": "keep"}')
 
-        write_ceo_session_id(tmp_path, "test-session-id", mode="improve")
+        write_ceo_session_id(tmp_path, "test-session-id", mode="design")
         mock_invoke = AsyncMock(return_value=("Done", 0))
 
         with patch("factory.agents.runner.invoke_agent", mock_invoke):
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 
@@ -1362,14 +1272,14 @@ class TestResumeHintInCompletionGuard:
         (strategy_dir / "current.md").write_text("#### H1: A\n")
         (tmp_path / ".factory" / "experiments").mkdir()
 
-        write_ceo_session_id(tmp_path, "interrupt-session", mode="improve")
+        write_ceo_session_id(tmp_path, "interrupt-session", mode="design")
         mock_invoke = AsyncMock(return_value=("Interrupted", 130))
 
         with patch("factory.agents.runner.invoke_agent", mock_invoke):
             await run_ceo_with_completion_guard(
                 tmp_path,
                 "Initial task",
-                mode="improve",
+                mode="design",
                 runner_name="claude",
             )
 

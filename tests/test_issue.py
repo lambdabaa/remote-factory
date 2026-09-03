@@ -732,7 +732,7 @@ class TestCmdCeoMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             headless=False,
             bg=False,
             bg_agents=False,
@@ -789,7 +789,7 @@ class TestCmdCeoMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             headless=False,
             bg=False,
             bg_agents=False,
@@ -840,7 +840,7 @@ class TestCmdCeoMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             headless=False,
             bg=False,
             bg_agents=False,
@@ -880,7 +880,7 @@ class TestCmdRunMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             loop=False,
             focus="111 and 112",
             discover_only=False,
@@ -917,7 +917,7 @@ class TestCmdRunMultiIssue:
             patch("factory.cli.run._print_banner"),
             patch("factory.cli.run._ensure_dashboard"),
             patch("factory.cli.run._run_single_cycle", return_value=0) as mock_cycle,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
             patch("factory.worktree.prune_stale", return_value=[]),
             patch("pathlib.Path.is_dir", return_value=True),
         ):
@@ -938,7 +938,7 @@ class TestCmdRunMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             loop=False,
             focus="42",
             discover_only=False,
@@ -974,7 +974,7 @@ class TestCmdRunMultiIssue:
             patch("factory.cli.run._print_banner"),
             patch("factory.cli.run._ensure_dashboard"),
             patch("factory.cli.run._run_single_cycle", return_value=0) as mock_cycle,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
             patch("factory.worktree.prune_stale", return_value=[]),
             patch("pathlib.Path.is_dir", return_value=True),
         ):
@@ -991,7 +991,7 @@ class TestCmdRunMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             loop=False,
             focus="111 and 112",
             discover_only=False,
@@ -1109,7 +1109,7 @@ class TestCmdRunBacklogMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             loop=False,
             focus="111 and 112",
             discover_only=False,
@@ -1146,7 +1146,7 @@ class TestCmdRunBacklogMultiIssue:
             patch("factory.cli.run._print_banner"),
             patch("factory.cli.run._ensure_dashboard"),
             patch("factory.cli.run._run_single_cycle", return_value=0),
-            patch("factory.cli.run._chain_modes", return_value=0),
+
             patch("factory.worktree.prune_stale", return_value=[]),
             patch("pathlib.Path.is_dir", return_value=True),
         ):
@@ -1160,7 +1160,7 @@ class TestCmdRunBacklogMultiIssue:
         ns = argparse.Namespace(
             path="/tmp/fake",
             profile=None,
-            mode="improve",
+            mode="design",
             loop=False,
             focus="111, 112",
             discover_only=False,
@@ -1197,7 +1197,7 @@ class TestCmdRunBacklogMultiIssue:
             patch("factory.cli.run._print_banner"),
             patch("factory.cli.run._ensure_dashboard"),
             patch("factory.cli.run._run_single_cycle", return_value=0) as mock_cycle,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
             patch("factory.worktree.prune_stale", return_value=[]),
             patch("pathlib.Path.is_dir", return_value=True),
         ):

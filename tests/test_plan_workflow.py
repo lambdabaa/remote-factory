@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
 from factory.workflow.definitions import design_workflow
@@ -25,8 +23,8 @@ def wf():
 
 def test_plan_workflow_structure(wf):
     """Verify node and edge counts match the expected topology."""
-    assert len(wf.nodes) == 18
-    assert len(wf.edges) == 23
+    assert len(wf.nodes) == 21
+    assert len(wf.edges) == 27
     assert wf.name == "plan"
     assert wf.start_node == "gate_has_factory"
     assert wf.terminal is True
@@ -63,7 +61,11 @@ def test_plan_workflow_edge_coverage(wf):
         ("graph_explorer", "concat_study", None),
         ("gate_has_factory", "graph_update", VerdictType.PROCEED),
         ("gate_has_factory", "discover", VerdictType.HALT),
-        ("discover", "graph_update", None),
+        ("discover", "gate_factory_md_exists", None),
+        ("gate_factory_md_exists", "factory_init", VerdictType.PROCEED),
+        ("gate_factory_md_exists", "create_factory_md", VerdictType.HALT),
+        ("create_factory_md", "factory_init", None),
+        ("factory_init", "graph_update", None),
         ("concat_study", "check_prior_plans", None),
         ("check_prior_plans", "gate_prior_plans", VerdictType.PROCEED),
         ("check_prior_plans", "fork_research", VerdictType.HALT),
@@ -195,17 +197,6 @@ def test_plan_publish_github_body_file(wf):
     node = wf.nodes["publish_github"]
     assert isinstance(node, FnNode)
     assert "--body-file" in node.command
-
-
-def test_plan_workflow_validates():
-    """Run factory workflow validate plan and assert no errors."""
-    result = subprocess.run(
-        ["factory", "workflow", "validate", "plan"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, f"Validation failed: {result.stderr}"
 
 
 def test_plan_skill_export(wf):

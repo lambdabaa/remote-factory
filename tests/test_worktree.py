@@ -10,11 +10,16 @@ import pytest
 from factory.worktree import (
     _SHARED_SYMLINK_ENTRIES,
     _bootstrap_unborn_repo,
+    _finalize_greenfield,
     _has_active_sessions,
+    _is_greenfield_run,
     _is_unborn_repo,
+    _list_active_worktrees,
+    _list_worktrees_with_branches,
     _preserve_telemetry,
     _seed_experiment_factory,
     _sync_backlog_to_main,
+    _sync_bootstrap_to_main,
     create_experiment_worktree,
     create_worktree,
     detect_default_branch,
@@ -1275,6 +1280,63 @@ class TestSelectiveWorktreeIsolation:
 
         assert main_backlog.read_text() == "original"
 
+    def test_sync_bootstrap_copies_fresh_files(self, tmp_path: Path) -> None:
+        wt = tmp_path / "worktree"
+        main = tmp_path / "main"
+        wt_factory = wt / ".factory"
+        wt_factory.mkdir(parents=True)
+        main.mkdir()
+
+        (wt_factory / "config.json").write_text('{"goal": "test"}')
+        (wt_factory / "eval_profile.json").write_text('{"dims": []}')
+        (wt / "factory.md").write_text("# Factory")
+
+        _sync_bootstrap_to_main(wt, main)
+
+        assert (main / ".factory" / "config.json").read_text() == '{"goal": "test"}'
+        assert (main / ".factory" / "eval_profile.json").read_text() == '{"dims": []}'
+        assert (main / "factory.md").read_text() == "# Factory"
+
+    def test_sync_bootstrap_skips_symlinks(self, tmp_path: Path) -> None:
+        wt = tmp_path / "worktree"
+        main = tmp_path / "main"
+        wt_factory = wt / ".factory"
+        wt_factory.mkdir(parents=True)
+        main_factory = main / ".factory"
+        main_factory.mkdir(parents=True)
+
+        (main_factory / "config.json").write_text("original")
+        (wt_factory / "config.json").symlink_to(main_factory / "config.json")
+
+        _sync_bootstrap_to_main(wt, main)
+
+        assert (main_factory / "config.json").read_text() == "original"
+
+    def test_sync_bootstrap_skips_existing_main_files(self, tmp_path: Path) -> None:
+        wt = tmp_path / "worktree"
+        main = tmp_path / "main"
+        wt_factory = wt / ".factory"
+        wt_factory.mkdir(parents=True)
+        main_factory = main / ".factory"
+        main_factory.mkdir(parents=True)
+
+        (wt_factory / "config.json").write_text("new")
+        (main_factory / "config.json").write_text("existing")
+
+        _sync_bootstrap_to_main(wt, main)
+
+        assert (main_factory / "config.json").read_text() == "existing"
+
+    def test_sync_bootstrap_noop_without_factory_dir(self, tmp_path: Path) -> None:
+        wt = tmp_path / "worktree"
+        main = tmp_path / "main"
+        wt.mkdir()
+        main.mkdir()
+
+        _sync_bootstrap_to_main(wt, main)
+
+        assert not (main / ".factory").exists()
+
     def test_two_worktrees_get_independent_dirs(self, git_project: Path) -> None:
         strategy_dir = git_project / ".factory" / "strategy"
         strategy_dir.mkdir(exist_ok=True)
@@ -1336,3 +1398,411 @@ class TestSelectiveWorktreeIsolation:
 
         assert (wt_path / ".factory" / "strategy").is_dir()
         assert not (wt_path / ".factory" / "strategy" / "backlog.md").exists()
+
+
+class TestIsGreenfieldRun:
+    def test_greenfield_detected(self, git_project: Path) -> None:
+        """Greenfield: main has no factory.md, worktree does."""
+        wt_path, _ = create_worktree(git_project)
+        assert not (git_project / "factory.md").exists()
+        (wt_path / "factory.md").write_text("# Goal\nTest\n")
+        assert _is_greenfield_run(wt_path, git_project) is True
+
+    def test_not_greenfield_when_main_has_factory_md(self, git_project: Path) -> None:
+        """Not greenfield when main already has factory.md."""
+        (git_project / "factory.md").write_text("# Goal\nExisting\n")
+        wt_path, _ = create_worktree(git_project)
+        (wt_path / "factory.md").write_text("# Goal\nTest\n")
+        assert _is_greenfield_run(wt_path, git_project) is False
+
+    def test_not_greenfield_when_worktree_has_no_factory_md(self, git_project: Path) -> None:
+        """Not greenfield when worktree has no factory.md."""
+        wt_path, _ = create_worktree(git_project)
+        assert _is_greenfield_run(wt_path, git_project) is False
+
+
+class TestFinalizeGreenfield:
+    def test_commits_untracked_factory_md(self, git_project: Path) -> None:
+        """_finalize_greenfield commits factory.md when untracked."""
+        wt_path, branch = create_worktree(git_project)
+        (wt_path / "factory.md").write_text("# Goal\nTest project\n")
+
+        result = _finalize_greenfield(wt_path, git_project, branch)
+
+        assert result is True
+        ls_files = subprocess.run(
+            ["git", "ls-files", "factory.md"],
+            cwd=wt_path,
+            capture_output=True,
+            text=True,
+        )
+        assert ls_files.stdout.strip() == "factory.md"
+
+    def test_noop_when_already_tracked(self, git_project: Path) -> None:
+        """_finalize_greenfield is a no-op when factory.md is already tracked."""
+        env = {
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@test.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@test.com",
+            "HOME": str(git_project.parent),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        }
+        wt_path, branch = create_worktree(git_project)
+        (wt_path / "factory.md").write_text("# Goal\nTest\n")
+        subprocess.run(["git", "add", "factory.md"], cwd=wt_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add factory.md"],
+            cwd=wt_path,
+            capture_output=True,
+            check=True,
+            env=env,
+        )
+
+        result = _finalize_greenfield(wt_path, git_project, branch)
+        assert result is True
+
+    def test_returns_false_when_no_factory_md(self, git_project: Path) -> None:
+        """_finalize_greenfield returns False when factory.md does not exist."""
+        wt_path, branch = create_worktree(git_project)
+        result = _finalize_greenfield(wt_path, git_project, branch)
+        assert result is False
+
+
+class TestRemoveWorktreeGreenfield:
+    def test_retains_worktree_on_finalization_failure(self, git_project: Path) -> None:
+        """remove_worktree retains worktree when greenfield finalization fails."""
+        wt_path, branch = create_worktree(git_project)
+        (wt_path / "factory.md").write_text("# Goal\nTest\n")
+
+        with patch("factory.worktree._finalize_greenfield", return_value=False):
+            remove_worktree(git_project, wt_path, branch)
+
+        assert wt_path.exists()
+
+    def test_proceeds_normally_for_non_greenfield(self, git_project: Path) -> None:
+        """remove_worktree proceeds normally for non-greenfield runs (regression)."""
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        remove_worktree(git_project, wt_path, branch)
+
+        assert not wt_path.exists()
+
+    def test_greenfield_success_removes_worktree(self, git_project: Path) -> None:
+        """remove_worktree removes worktree after successful greenfield finalization."""
+        wt_path, branch = create_worktree(git_project)
+        (wt_path / "factory.md").write_text("# Goal\nTest\n")
+
+        with patch("factory.worktree._finalize_greenfield", return_value=True):
+            remove_worktree(git_project, wt_path, branch)
+
+        assert not wt_path.exists()
+
+    def test_no_worktree_mode_skips_finalization(self, git_project: Path) -> None:
+        """When worktree_path == project_path, skip greenfield finalization."""
+        (git_project / "factory.md").write_text("# Goal\nTest\n")
+
+        with patch("factory.worktree._finalize_greenfield") as mock_finalize:
+            remove_worktree(git_project, git_project / "nonexistent", "factory/run-test")
+
+        mock_finalize.assert_not_called()
+
+
+class TestListWorktreesWithBranches:
+    """Test _list_worktrees_with_branches porcelain parser."""
+
+    def test_parses_standard_and_nonstandard_branches(self, tmp_path: Path) -> None:
+        """Correctly maps path→branch including non-standard branch names."""
+        porcelain = (
+            "worktree /home/user/project\n"
+            "HEAD abc123\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /home/user/project/.factory-worktrees/run-7935f857\n"
+            "HEAD def456\n"
+            "branch refs/heads/fix/readme-content-regression\n"
+            "\n"
+            "worktree /home/user/project/.factory-worktrees/run-55eccbe3\n"
+            "HEAD aaa111\n"
+            "branch refs/heads/factory/run-2e37f04d\n"
+            "\n"
+            "worktree /home/user/project/.factory-worktrees/exp-1\n"
+            "HEAD bbb222\n"
+            "branch refs/heads/factory/exp-1\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr=""
+        )
+        with patch("factory.worktree.subprocess.run", return_value=mock_result):
+            mapping = _list_worktrees_with_branches(tmp_path)
+
+        assert mapping == {
+            "/home/user/project": "main",
+            "/home/user/project/.factory-worktrees/run-7935f857": "fix/readme-content-regression",
+            "/home/user/project/.factory-worktrees/run-55eccbe3": "factory/run-2e37f04d",
+            "/home/user/project/.factory-worktrees/exp-1": "factory/exp-1",
+        }
+
+    def test_detached_head_omitted(self, tmp_path: Path) -> None:
+        """Detached-HEAD worktrees (no branch line) are omitted from the result."""
+        porcelain = (
+            "worktree /home/user/project\n"
+            "HEAD abc123\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /home/user/project/.factory-worktrees/run-detached\n"
+            "HEAD ccc333\n"
+            "detached\n"
+            "\n"
+            "worktree /home/user/project/.factory-worktrees/run-abcd1234\n"
+            "HEAD ddd444\n"
+            "branch refs/heads/factory/run-abcd1234\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr=""
+        )
+        with patch("factory.worktree.subprocess.run", return_value=mock_result):
+            mapping = _list_worktrees_with_branches(tmp_path)
+
+        assert "/home/user/project/.factory-worktrees/run-detached" not in mapping
+        assert mapping["/home/user/project"] == "main"
+        assert (
+            mapping["/home/user/project/.factory-worktrees/run-abcd1234"]
+            == "factory/run-abcd1234"
+        )
+
+    def test_empty_output(self, tmp_path: Path) -> None:
+        """Empty git output returns empty dict."""
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch("factory.worktree.subprocess.run", return_value=mock_result):
+            mapping = _list_worktrees_with_branches(tmp_path)
+
+        assert mapping == {}
+
+
+class TestWorktreeGCIdleReclaim:
+    """Tests for idle git-registered worktree GC in prune_stale()."""
+
+    def test_idle_standard_branch_no_session_is_reclaimed(
+        self, git_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idle worktree on factory/run-* with no active session IS reclaimed."""
+        monkeypatch.delenv("FACTORY_REMOVE_WORKTREE", raising=False)
+        # Set a very short idle threshold (0 hours = reclaim everything idle)
+        monkeypatch.setenv("FACTORY_WORKTREE_IDLE_RECLAIM_HOURS", "0")
+
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        with (
+            patch("factory.worktree._has_active_sessions", return_value=False),
+            patch("factory.events.emit_event") as mock_emit,
+        ):
+            pruned = prune_stale(git_project)
+
+        # Directory should be removed
+        assert not wt_path.exists()
+
+        # Should have a GC reclaim message in pruned
+        assert any("GC reclaimed" in msg and branch in msg for msg in pruned)
+
+        # git branch -D should have been called for the real branch
+        branch_result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            cwd=git_project,
+            capture_output=True,
+            text=True,
+        )
+        assert branch not in branch_result.stdout
+
+        # worktree.gc_reclaimed event should be emitted
+        mock_emit.assert_called_once()
+        call_args = mock_emit.call_args
+        assert call_args[0][1] == "worktree.gc_reclaimed"
+        event_data = call_args[1]["data"] if "data" in call_args[1] else call_args[0][2]
+        assert event_data["branch"] == branch
+        assert event_data["reclaim_reason"] == "idle_standard_branch_no_session"
+        assert "worktree_path" in event_data
+        assert "idle_seconds" in event_data
+
+    def test_idle_nonstandard_branch_not_touched(
+        self, git_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idle worktree on a non-standard branch (e.g. fix/...) is NOT touched."""
+        monkeypatch.delenv("FACTORY_REMOVE_WORKTREE", raising=False)
+        monkeypatch.setenv("FACTORY_WORKTREE_IDLE_RECLAIM_HOURS", "0")
+
+        # Create a worktree, then manually associate it with a non-standard branch
+        # in the porcelain mapping
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        # Create a fake mapping where this worktree has a non-standard branch
+        fake_branch = "fix/readme-content-regression"
+        real_mapping = {str(git_project.resolve()): "main"}
+        real_mapping[str(wt_path.resolve())] = fake_branch
+
+        with (
+            patch("factory.worktree._list_worktrees_with_branches", return_value=real_mapping),
+            patch("factory.worktree._has_active_sessions", return_value=False),
+            patch("factory.events.emit_event") as mock_emit,
+        ):
+            pruned = prune_stale(git_project)
+
+        # Directory should survive
+        assert wt_path.exists()
+
+        # No GC reclaim events
+        mock_emit.assert_not_called()
+
+        # No GC messages in pruned
+        assert not any("GC reclaimed" in msg for msg in pruned)
+
+    def test_active_session_worktree_not_touched(
+        self, git_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worktree with active session is NOT touched regardless of age."""
+        monkeypatch.delenv("FACTORY_REMOVE_WORKTREE", raising=False)
+        monkeypatch.setenv("FACTORY_WORKTREE_IDLE_RECLAIM_HOURS", "0")
+
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        with (
+            patch("factory.worktree._has_active_sessions", return_value=True),
+            patch("factory.events.emit_event") as mock_emit,
+        ):
+            pruned = prune_stale(git_project)
+
+        # Directory should survive
+        assert wt_path.exists()
+
+        # No GC events
+        mock_emit.assert_not_called()
+        assert not any("GC reclaimed" in msg for msg in pruned)
+
+    def test_fresh_worktree_not_touched(
+        self, git_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh (non-idle) worktree is NOT touched."""
+        monkeypatch.delenv("FACTORY_REMOVE_WORKTREE", raising=False)
+        # Use a very high threshold to ensure the worktree is considered fresh
+        monkeypatch.setenv("FACTORY_WORKTREE_IDLE_RECLAIM_HOURS", "9999")
+
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        with (
+            patch("factory.worktree._has_active_sessions", return_value=False),
+            patch("factory.events.emit_event") as mock_emit,
+        ):
+            pruned = prune_stale(git_project)
+
+        # Directory should survive
+        assert wt_path.exists()
+
+        # No GC events
+        mock_emit.assert_not_called()
+        assert not any("GC reclaimed" in msg for msg in pruned)
+
+
+class TestDetachedHeadWorktreeSurvives:
+    """Regression test: a detached-HEAD worktree must NOT be deleted by prune_stale().
+
+    Before this fix, _list_active_worktrees() derived from
+    _list_worktrees_with_branches().keys(), which omits detached-HEAD worktrees.
+    This caused Sweep 1 (orphan detection) to misclassify a git-registered
+    detached-HEAD worktree as an orphan and destroy it — bypassing the idle-age
+    and active-session guardrails entirely.
+    """
+
+    def test_detached_head_worktree_not_deleted(
+        self, git_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A git-registered detached-HEAD worktree with uncommitted work survives prune_stale."""
+        monkeypatch.delenv("FACTORY_REMOVE_WORKTREE", raising=False)
+        # Conservative threshold: nothing should be reclaimed by idle-GC
+        monkeypatch.setenv("FACTORY_WORKTREE_IDLE_RECLAIM_HOURS", "9999")
+
+        env = {
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@test.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@test.com",
+            "HOME": str(git_project.parent),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        }
+
+        # 1. Create a real factory worktree
+        wt_path, branch = create_worktree(git_project)
+        assert wt_path.exists()
+
+        # 2. Write an uncommitted file (precious work that must survive)
+        precious_file = wt_path / "precious_uncommitted.txt"
+        precious_file.write_text("important uncommitted work — must not be destroyed")
+
+        # 3. Detach HEAD inside the worktree (simulates git checkout --detach,
+        #    interrupted rebase, or bisect)
+        subprocess.run(
+            ["git", "checkout", "--detach"],
+            cwd=wt_path,
+            capture_output=True,
+            check=True,
+            env=env,
+        )
+
+        # Verify the worktree IS registered but has no branch (detached HEAD)
+        porcelain = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=git_project,
+            capture_output=True,
+            text=True,
+        ).stdout
+        # The worktree path should appear in porcelain output
+        assert str(wt_path.resolve()) in porcelain
+
+        # Verify _list_active_worktrees includes the detached worktree
+        active = _list_active_worktrees(git_project)
+        assert str(wt_path.resolve()) in active
+
+        # Verify _list_worktrees_with_branches does NOT include it (no branch)
+        branch_map = _list_worktrees_with_branches(git_project)
+        assert str(wt_path.resolve()) not in branch_map
+
+        # 4. Run prune_stale with active sessions patched True (extra safety)
+        with (
+            patch("factory.worktree._has_active_sessions", return_value=True),
+            patch("factory.events.emit_event") as mock_emit,
+        ):
+            pruned = prune_stale(git_project)
+
+        # 5. Assert: the worktree directory STILL EXISTS
+        assert wt_path.exists(), (
+            f"Detached-HEAD worktree was destroyed by prune_stale! pruned={pruned}"
+        )
+
+        # 6. Assert: the uncommitted file STILL EXISTS
+        assert precious_file.exists(), (
+            "Uncommitted file in detached-HEAD worktree was destroyed!"
+        )
+        assert precious_file.read_text() == "important uncommitted work — must not be destroyed"
+
+        # 7. Assert: the branch is NOT deleted
+        branch_result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            cwd=git_project,
+            capture_output=True,
+            text=True,
+        )
+        assert branch in branch_result.stdout, (
+            f"Branch {branch} was deleted even though the worktree is still registered!"
+        )
+
+        # 8. No orphan or GC messages for this worktree
+        assert not any(wt_path.name in msg for msg in pruned), (
+            f"Detached-HEAD worktree appeared in pruned messages: {pruned}"
+        )
+        mock_emit.assert_not_called()

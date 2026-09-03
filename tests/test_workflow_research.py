@@ -9,7 +9,6 @@ from factory.workflow.definitions import (
     build_workflow,
     create_workflow,
     design_workflow,
-    register_all,
 )
 from factory.workflow.primitives import (
     AgentNode,
@@ -301,13 +300,9 @@ class TestResearchStandaloneWorkflow:
         wf = self._get_wf()
         assert wf.trigger is not None
         assert not wf.trigger(ProjectState.HAS_FACTORY, {})
-        assert not wf.trigger(ProjectState.HAS_FACTORY, {"mode": "improve"})
+        assert not wf.trigger(ProjectState.HAS_FACTORY, {"mode": "design"})
         assert not wf.trigger(ProjectState.HAS_FACTORY, {"mode": "research"})
 
-    def test_registered(self) -> None:
+    def test_not_registered_after_mode_removal(self) -> None:
         reg = _get_builtin_registry()
-        assert "research-standalone" in reg
-
-    def test_register_all_includes_it(self) -> None:
-        all_wf = register_all()
-        assert "research-standalone" in all_wf
+        assert "research-standalone" not in reg

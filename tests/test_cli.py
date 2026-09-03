@@ -174,8 +174,8 @@ class TestParser:
 
     def test_ceo_mode_interactive_backward_compat(self):
         parser = build_parser()
-        args = parser.parse_args(["ceo", "distributed eval runner", "--mode", "interactive"])
-        assert args.mode == "interactive"
+        args = parser.parse_args(["ceo", "distributed eval runner", "--mode", "design"])
+        assert args.mode == "design"
         assert args.path == "distributed eval runner"
 
     def test_ceo_mode_project_prefix(self):
@@ -419,10 +419,10 @@ class TestCmdCeoDesign:
         task = cmd[dsp_idx + 1]
         assert "Mode: ideation" in task
 
-    def test_interactive_backward_compat_alias(self, tmp_path):
-        """--mode interactive is accepted as a backward-compatible alias for design."""
+    def test_design_mode_emits_plan_loop(self, tmp_path):
+        """--mode design generates a task with the Plan Loop section."""
         with _mock_foreground() as mock_run:
-            main(["ceo", str(tmp_path), "--mode", "interactive"])
+            main(["ceo", str(tmp_path), "--mode", "design"])
         cmd = mock_run.call_args[0][0]
         dsp_idx = cmd.index("--dangerously-skip-permissions")
         task = cmd[dsp_idx + 1]
@@ -430,7 +430,7 @@ class TestCmdCeoDesign:
 
     def test_auto_approve_rejected_without_design_mode(self, capsys):
         """--auto-approve without --mode design is rejected."""
-        result = main(["ceo", "/some/path", "--mode", "improve", "--auto-approve"])
+        result = main(["ceo", "/some/path", "--mode", "founder", "--auto-approve"])
         assert result == 1
         assert "--auto-approve only applies to --mode design" in capsys.readouterr().err
 
@@ -514,7 +514,7 @@ class TestCmdCeoDesign:
 class TestRunAutoApprove:
     def test_run_auto_approve_rejected_without_design(self, capsys):
         """cmd_run rejects --auto-approve when mode is not design."""
-        result = main(["run", "/some/path", "--mode", "improve", "--auto-approve"])
+        result = main(["run", "/some/path", "--mode", "founder", "--auto-approve"])
         assert result == 1
         assert "--auto-approve only applies to --mode design" in capsys.readouterr().err
 
@@ -523,6 +523,14 @@ class TestRunAutoApprove:
         result = main(["run", "/some/path", "--auto-approve"])
         assert result == 1
         assert "--auto-approve only applies to --mode design" in capsys.readouterr().err
+
+
+class TestRunFocusIncompatibleMode:
+    def test_run_focus_rejected_with_incompatible_mode(self, capsys):
+        """cmd_run rejects --focus with a mode other than design or research."""
+        result = main(["run", "/some/path", "--mode", "founder", "--focus", "auth"])
+        assert result == 1
+        assert "only works in design or research mode" in capsys.readouterr().err
 
 
 class TestAutoApproveEvent:
@@ -603,132 +611,6 @@ class TestHasResearchTarget:
         }
         (factory_dir / "config.json").write_text(json.dumps(_make_config(research_target=rt)))
         assert _has_research_target(tmp_path) is True
-
-
-class TestCmdCeoResearchIdeation:
-    def test_research_headless_new_project_incompatible(self, capsys):
-        result = main(["ceo", "swe-bench solver", "--mode", "research", "--headless"])
-        assert result == 1
-        assert "foreground" in capsys.readouterr().err.lower()
-
-    def test_research_prompt_incompatible(self, capsys):
-        result = main(["ceo", "swe-bench solver", "--mode", "research", "--prompt", "file.md"])
-        assert result == 1
-        assert "mutually exclusive" in capsys.readouterr().err.lower()
-
-    def test_research_focus_works_with_existing_project(self, tmp_path):
-        """--focus works with --mode research on existing projects with research_target."""
-        (tmp_path / ".git").mkdir()
-        factory_dir = tmp_path / ".factory"
-        factory_dir.mkdir()
-        rt = {
-            "objective": "maximize accuracy",
-            "metric": "accuracy",
-            "target": 0.9,
-            "run_command": "python run.py",
-            "result_path": "results.json",
-        }
-        (factory_dir / "config.json").write_text(json.dumps(_make_config(research_target=rt)))
-        with _mock_foreground() as mock_run:
-            main(["ceo", str(tmp_path), "--mode", "research", "--focus", "tokenizer"])
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "## Focus Directive" in task
-        assert "tokenizer" in task
-
-    def test_research_focus_incompatible_new_project(self, capsys):
-        """--focus with --mode research on a new idea string errors."""
-        result = main(["ceo", "swe-bench solver", "--mode", "research", "--focus", "tokenizer"])
-        assert result == 1
-        assert "focus" in capsys.readouterr().err.lower()
-
-    def test_research_file_input_not_ideation(self, tmp_path, capsys):
-        """--mode research with a file path treats it as a spec, not an idea string."""
-        spec_file = tmp_path / "spec.md"
-        spec_file.write_text("# My Research Project\n")
-        result = main(["ceo", str(spec_file), "--mode", "research"])
-        # File gets resolved as spec input, not as an idea string for ideation.
-        # Errors because the resulting project has no research_target configured.
-        assert result == 1
-        assert "research_target" in capsys.readouterr().err
-
-    def test_research_existing_dir_no_target_errors(self, tmp_path, capsys):
-        """--mode research on existing dir without research_target errors."""
-        (tmp_path / ".git").mkdir()
-        result = main(["ceo", str(tmp_path), "--mode", "research"])
-        assert result == 1
-        assert "research_target" in capsys.readouterr().err
-
-    def test_research_ideation_foreground_uses_subprocess_run(self):
-        """--mode research with idea string launches via subprocess.run."""
-        with _mock_foreground() as mock_run:
-            main(["ceo", "swe-bench solver agent", "--mode", "research"])
-        claude_calls = [c for c in mock_run.call_args_list if c[0][0][0] == "claude"]
-        assert len(claude_calls) == 1
-        cmd = claude_calls[0][0][0]
-        assert cmd[0] == "claude"
-
-    def test_research_ideation_task_has_plan_loop(self):
-        """--mode research with idea injects Plan Loop (Interactive) block."""
-        with _mock_foreground() as mock_run:
-            main(["ceo", "swe-bench solver agent", "--mode", "research"])
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "## Plan Loop (Interactive)" in task
-        assert "swe-bench solver agent" in task
-
-    def test_research_ideation_task_mode_is_ideation(self):
-        """--mode research with idea sets Mode: ideation (not build) since it enters ideation first."""
-        with _mock_foreground() as mock_run:
-            main(["ceo", "swe-bench solver agent", "--mode", "research"])
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "Mode: ideation" in task
-
-    def test_research_ideation_uses_plan_loop_not_design(self):
-        """--mode research should use Plan Loop, not a separate Design Mode block."""
-        with _mock_foreground() as mock_run:
-            main(["ceo", "swe-bench solver agent", "--mode", "research"])
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "## Plan Loop (Interactive)" in task
-
-    def test_research_ideation_mentions_research_config(self):
-        """--mode research ideation task mentions research config fields."""
-        with _mock_foreground() as mock_run:
-            main(["ceo", "swe-bench solver agent", "--mode", "research"])
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "Research Target" in task
-        assert "Mutable Surfaces" in task
-        assert "Fixed Surfaces" in task
-
-    def test_research_existing_project_with_target_skips_ideation(self, tmp_path):
-        """--mode research on existing project WITH research_target skips ideation."""
-        (tmp_path / ".git").mkdir()
-        factory_dir = tmp_path / ".factory"
-        factory_dir.mkdir()
-        rt = {
-            "objective": "maximize accuracy",
-            "metric": "accuracy",
-            "target": 0.9,
-            "run_command": "python run.py",
-            "result_path": "results.json",
-        }
-        (factory_dir / "config.json").write_text(json.dumps(_make_config(research_target=rt)))
-        with _mock_foreground() as mock_run:
-            main(["ceo", str(tmp_path), "--mode", "research"])
-        cmd = mock_run.call_args[0][0]
-        dsp_idx = cmd.index("--dangerously-skip-permissions")
-        task = cmd[dsp_idx + 1]
-        assert "## Plan Loop (Interactive)" not in task
-        assert "Mode: research" in task
 
 
 class TestCmdDetect:
@@ -1045,13 +927,13 @@ class TestRunModeFlag:
 
     def test_mode_discover(self):
         parser = build_parser()
-        args = parser.parse_args(["run", "/some/path", "--mode", "discover"])
-        assert args.mode == "discover"
+        args = parser.parse_args(["run", "/some/path", "--mode", "design"])
+        assert args.mode == "design"
 
     def test_mode_improve_explicit(self):
         parser = build_parser()
-        args = parser.parse_args(["run", "/some/path", "--mode", "improve"])
-        assert args.mode == "improve"
+        args = parser.parse_args(["run", "/some/path", "--mode", "design"])
+        assert args.mode == "design"
 
     def test_mode_meta(self):
         parser = build_parser()
@@ -1102,31 +984,31 @@ class TestRunWithGitHubUrl:
         """cmd_run with a local path does not clone — just invokes CEO."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(["run", str(tmp_path)])
 
         assert result == 0
         mock_agent.assert_called_once()
 
-    def test_run_discover_mode(self, tmp_path):
-        """cmd_run with --mode=discover passes discover task to CEO."""
+    def test_run_design_mode(self, tmp_path):
+        """cmd_run with --mode=design passes design task to CEO."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
-            result = main(["run", str(tmp_path), "--mode", "discover"])
+            result = main(["run", str(tmp_path), "--mode", "design"])
 
         assert result == 0
         call_args = mock_agent.call_args
         task = call_args[0][1]  # second positional arg is the task
-        assert "Discover mode" in task
+        assert "Mode: design" in task
 
     def test_run_meta_mode(self, tmp_path):
         """cmd_run with --mode=meta passes meta task to CEO."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(["run", str(tmp_path), "--mode", "meta"])
 
@@ -1182,7 +1064,7 @@ class TestHeartbeatLoop:
         """Without --loop, cmd_run executes exactly one cycle."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(["run", str(tmp_path)])
         assert result == 0
@@ -1192,7 +1074,7 @@ class TestHeartbeatLoop:
         """With --loop --max-cycles=3, runs exactly 3 cycles then exits."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(
                 [
@@ -1218,7 +1100,7 @@ class TestHeartbeatLoop:
         """--max-cycles=1 runs one cycle, no sleep, then exits."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()),
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(
                 [
@@ -1255,7 +1137,7 @@ class TestHeartbeatLoop:
                 "factory.agents.runner.invoke_agent",
                 AsyncMock(side_effect=_trigger_sigterm_after_cycle),
             ),
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(["run", str(tmp_path), "--loop", "--interval", "30"])
 
@@ -1284,7 +1166,7 @@ class TestHeartbeatLoop:
                 "factory.agents.runner.invoke_agent",
                 AsyncMock(side_effect=_trigger_sigint_after_cycle),
             ),
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(["run", str(tmp_path), "--loop", "--interval", "30"])
 
@@ -1296,7 +1178,7 @@ class TestHeartbeatLoop:
         """Verify the sleep log message appears between cycles."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()),
-            patch("factory.cli.run._chain_modes", return_value=0),
+
         ):
             result = main(
                 [
@@ -1627,7 +1509,7 @@ class TestCmdCeo:
         """cmd_ceo --headless spawns CEO agent via invoke_agent."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
         ):
             result = main(["ceo", str(tmp_path), "--headless"])
         assert result == 0
@@ -1640,7 +1522,7 @@ class TestCmdCeo:
         """cmd_ceo --headless with --mode=meta includes meta instructions."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
         ):
             result = main(["ceo", str(tmp_path), "--mode", "meta", "--headless"])
         assert result == 0
@@ -1653,7 +1535,7 @@ class TestCmdCeo:
         with (
             patch("factory.cli._path_resolver.subprocess.run") as mock_clone,
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()),
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
             patch("factory.cli._path_resolver.tempfile.mkdtemp", return_value="/tmp/factory-ceo"),
             patch("factory.cli._ceo_helpers._read_target_branch", return_value="main"),
             patch("factory.graph.is_graphify_installed", return_value=False),
@@ -1669,7 +1551,7 @@ class TestCmdCeo:
         """CEO agent gets 7200s timeout in headless mode."""
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
         ):
             main(["ceo", str(tmp_path), "--headless"])
         call_kwargs = mock_agent.call_args[1]
@@ -1896,7 +1778,7 @@ class TestResolveInput:
             patch(
                 "factory.cli._path_resolver._get_projects_dir", return_value=tmp_path / "projects"
             ),
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
         ):
             main(["ceo", str(idea_file), "--headless"])
@@ -1979,7 +1861,7 @@ class TestResearchMode:
         (factory_dir / "config.json").write_text(json.dumps(_make_config(research_target=rt)))
         with (
             patch("factory.agents.runner.invoke_agent", _mock_invoke_agent_ok()) as mock_agent,
-            patch("factory.cli._ceo_helpers._chain_modes", return_value=0),
+
         ):
             result = main(["ceo", str(tmp_path), "--mode", "research", "--headless"])
         assert result == 0
@@ -1987,77 +1869,58 @@ class TestResearchMode:
         assert "Research mode" in task
         assert "research_target" in task
 
-    def test_auto_detect_research_mode(self, tmp_project, sample_config):
-        """Auto-detection returns 'research' when config has research_target."""
-        from factory.models import ResearchTarget
+    def test_auto_detect_design_mode(self, tmp_project, sample_config):
+        """Auto-detection returns 'design' for all project states."""
         from factory.store import ExperimentStore
 
-        rt = ResearchTarget(
-            objective="Minimize loss",
-            metric="val_loss",
-            target=0.01,
-            run_command="python train.py",
-            result_path="metrics.json",
-        )
-        config_with_research = sample_config.model_copy(update={"research_target": rt})
-        store = ExperimentStore(tmp_project)
-        asyncio.run(store.init(config_with_research))
-
-        from factory.cli._mode_handlers import _auto_detect_mode
-
-        mode = _auto_detect_mode(tmp_project, force_fresh=True)
-        assert mode == "research"
-
-    def test_auto_detect_improve_without_research(self, tmp_project, sample_config):
-        """Auto-detection returns 'improve' when no research_target is set."""
         store = ExperimentStore(tmp_project)
         asyncio.run(store.init(sample_config))
 
         from factory.cli._mode_handlers import _auto_detect_mode
 
         mode = _auto_detect_mode(tmp_project, force_fresh=True)
-        assert mode == "improve"
+        assert mode == "design"
 
 
 class TestBuildCeoTaskDesign:
     """Unit tests for _build_ceo_task design_existing parameter."""
 
     def test_existing_project_emits_plan_loop_section(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", design_existing=True)
+        task = _build_ceo_task(tmp_path, "design", design_existing=True)
         assert "## Plan Loop (Interactive)" in task
         assert "existing_project: true" in task
         assert "existing project" in task
 
     def test_existing_project_with_focus(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", design_existing=True, focus="auth layer")
+        task = _build_ceo_task(tmp_path, "design", design_existing=True, focus="auth layer")
         assert "## Plan Loop (Interactive)" in task
         assert "auth layer" in task
         assert "Focus topic" in task
 
     def test_existing_project_without_focus(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", design_existing=True)
+        task = _build_ceo_task(tmp_path, "design", design_existing=True)
         assert "No specific topic was provided" in task
 
     def test_new_idea_emits_plan_loop_section(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", design_idea="weather CLI")
+        task = _build_ceo_task(tmp_path, "design", design_idea="weather CLI")
         assert "## Plan Loop (Interactive)" in task
         assert "weather CLI" in task
 
     def test_existing_uses_same_header_as_new_idea(self, tmp_path):
         """Both new ideas and existing projects use the same Plan Loop header."""
-        existing_task = _build_ceo_task(tmp_path, "build", design_existing=True)
-        new_task = _build_ceo_task(tmp_path, "build", design_idea="weather CLI")
+        existing_task = _build_ceo_task(tmp_path, "design", design_existing=True)
+        new_task = _build_ceo_task(tmp_path, "design", design_idea="weather CLI")
         assert "## Plan Loop (Interactive)" in existing_task
         assert "## Plan Loop (Interactive)" in new_task
 
     def test_existing_project_has_existing_flag(self, tmp_path):
         """Existing project task includes the existing_project flag for CEO conditionals."""
-        task = _build_ceo_task(tmp_path, "build", design_existing=True)
+        task = _build_ceo_task(tmp_path, "design", design_existing=True)
         assert "existing_project: true" in task
 
     def test_existing_mode_shows_display_mode(self, tmp_path):
         """When display_mode is provided, task shows it instead of internal mode."""
-        task = _build_ceo_task(tmp_path, "build", design_existing=True, display_mode="design")
+        task = _build_ceo_task(tmp_path, "design", design_existing=True, display_mode="design")
         assert "Mode: design" in task
 
 
@@ -2089,7 +1952,7 @@ class TestCreateModeFocus:
 
     def test_build_ceo_task_create_description(self, tmp_path):
         """_build_ceo_task emits the Create Mode section when create_description is provided."""
-        task = _build_ceo_task(tmp_path, "build", create_description="a mode for validating PRs")
+        task = _build_ceo_task(tmp_path, "design", create_description="a mode for validating PRs")
         assert "## Create Mode (New Factory Mode)" in task
         assert "a mode for validating PRs" in task
         assert "Mode description from user" in task
@@ -2097,8 +1960,15 @@ class TestCreateModeFocus:
 
     def test_build_ceo_task_no_create_description(self, tmp_path):
         """_build_ceo_task omits the Create Mode section when create_description is None."""
-        task = _build_ceo_task(tmp_path, "build", create_description=None)
+        task = _build_ceo_task(tmp_path, "design", create_description=None)
         assert "## Create Mode (New Factory Mode)" not in task
+
+    def test_focus_accepted_with_create_v2_mode(self, tmp_path):
+        """--focus is accepted when --mode create-v2 is set (issue #1428)."""
+        (tmp_path / ".git").mkdir()
+        with _mock_foreground() as mock_run:
+            main(["ceo", str(tmp_path), "--mode", "create-v2", "--focus", "add a linting mode"])
+        mock_run.assert_called_once()
 
 
 class TestProfileParser:
@@ -2195,7 +2065,6 @@ class TestCmdHomeReturnsFactoryDir:
         assert result == 0
         output = capsys.readouterr().out.strip()
         assert "site-packages" not in output or Path(output).is_dir()
-        assert (Path(output) / "templates").is_dir()
         assert (Path(output) / "cli" / "__init__.py").is_file()
 
 
@@ -2447,7 +2316,7 @@ class TestRefineFlag:
 
     def test_refine_exclusive_with_interactive(self, tmp_path, capsys):
         with _mock_foreground():
-            result = main(["ceo", str(tmp_path), "--refine", "fix bug", "--mode", "interactive"])
+            result = main(["ceo", str(tmp_path), "--refine", "fix bug", "--mode", "design"])
         assert result == 1
         assert "mutually exclusive" in capsys.readouterr().err
 
@@ -2496,17 +2365,17 @@ class TestBuildCeoTaskRefine:
     """Tests for _build_ceo_task refinement mode section."""
 
     def test_refine_request_emits_section(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", refine_request="fix the login bug")
+        task = _build_ceo_task(tmp_path, "design", refine_request="fix the login bug")
         assert "## Refinement Mode" in task
         assert "fix the login bug" in task
         assert "Mode: Refine" in task
 
     def test_no_refine_request_omits_section(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build")
+        task = _build_ceo_task(tmp_path, "design")
         assert "## Refinement Mode" not in task
 
     def test_refine_request_none_omits_section(self, tmp_path):
-        task = _build_ceo_task(tmp_path, "build", refine_request=None)
+        task = _build_ceo_task(tmp_path, "design", refine_request=None)
         assert "## Refinement Mode" not in task
 
 
@@ -2650,7 +2519,7 @@ class TestFromPlanFlag:
 
     def test_from_plan_requires_design_mode(self, capsys):
         """--from-plan without --mode design is rejected."""
-        result = main(["ceo", "/some/path", "--mode", "improve", "--from-plan", "plan.md"])
+        result = main(["ceo", "/some/path", "--mode", "founder", "--from-plan", "plan.md"])
         assert result == 1
         assert "--from-plan requires --mode design" in capsys.readouterr().err
 
@@ -3046,7 +2915,7 @@ class TestJustPlanFlag:
 
     def test_just_plan_requires_design_mode(self, capsys):
         """--just-plan without --mode design is rejected."""
-        result = main(["ceo", "/some/path", "--mode", "improve", "--just-plan"])
+        result = main(["ceo", "/some/path", "--mode", "founder", "--just-plan"])
         assert result == 1
         assert "--just-plan requires --mode design" in capsys.readouterr().err
 

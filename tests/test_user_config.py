@@ -22,7 +22,7 @@ class TestResolve:
     def test_cli_wins_over_all(self, config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from factory.user_config import resolve
 
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         config_dir.write_text('[defaults]\nrunner = "vertex"')
         result = resolve("runner", cli_value="claude", env_var="FACTORY_RUNNER",
                          config={"defaults": {"runner": "vertex"}}, default="fallback")
@@ -31,10 +31,10 @@ class TestResolve:
     def test_env_wins_over_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from factory.user_config import resolve
 
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         result = resolve("runner", env_var="FACTORY_RUNNER",
                          config={"defaults": {"runner": "vertex"}}, default="fallback")
-        assert result == "bob"
+        assert result == "alt"
 
     def test_config_wins_over_default(self) -> None:
         from factory.user_config import resolve
@@ -69,16 +69,16 @@ class TestResolve:
     def test_empty_cli_value_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from factory.user_config import resolve
 
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         result = resolve("runner", cli_value="", env_var="FACTORY_RUNNER")
-        assert result == "bob"
+        assert result == "alt"
 
     def test_whitespace_cli_value_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from factory.user_config import resolve
 
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         result = resolve("runner", cli_value="   ", env_var="FACTORY_RUNNER")
-        assert result == "bob"
+        assert result == "alt"
 
 
 class TestLoadConfig:
@@ -90,9 +90,9 @@ class TestLoadConfig:
     def test_reads_toml(self, config_dir: Path) -> None:
         from factory.user_config import load_config
 
-        config_dir.write_text('[defaults]\nrunner = "bob"\nmodel = "opus"')
+        config_dir.write_text('[defaults]\nrunner = "alt"\nmodel = "opus"')
         data = load_config()
-        assert data["defaults"]["runner"] == "bob"
+        assert data["defaults"]["runner"] == "alt"
         assert data["defaults"]["model"] == "opus"
 
     def test_profile_injects_env_vars(
@@ -113,8 +113,8 @@ class TestLoadConfig:
         from factory.user_config import load_config
 
         config_dir.write_text('[credentials.vertex]\nFACTORY_RUNNER = "claude"')
-        with pytest.raises(KeyError, match="bob"):
-            load_config(profile="bob")
+        with pytest.raises(KeyError, match="missing"):
+            load_config(profile="missing")
 
     def test_profile_requires_file(self, config_dir: Path) -> None:
         from factory.user_config import load_config
@@ -129,7 +129,7 @@ class TestValidation:
 
         _validate_profile_name("vertex-ai")
         _validate_profile_name("prod_1")
-        _validate_profile_name("Bob")
+        _validate_profile_name("Prod")
 
     def test_invalid_profile_name_raises(self) -> None:
         from factory.user_config import _validate_profile_name
@@ -169,7 +169,7 @@ class TestMasking:
         assert is_sensitive("api_key")
         assert is_sensitive("secret")
         assert is_sensitive("password")
-        assert is_sensitive("BOB_TOKEN")
+        assert is_sensitive("SERVICE_TOKEN")
         assert not is_sensitive("runner")
         assert not is_sensitive("model")
         assert not is_sensitive("projects_dir")
@@ -245,7 +245,7 @@ class TestMigrateEnvToConfig:
     ) -> None:
         tomli_w = pytest.importorskip("tomli_w")  # noqa: F841
 
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         monkeypatch.setenv("FACTORY_MODEL", "opus")
         monkeypatch.delenv("FACTORY_PROJECTS_DIR", raising=False)
 
@@ -258,7 +258,7 @@ class TestMigrateEnvToConfig:
         import tomllib
         with open(config_dir, "rb") as f:
             data = tomllib.load(f)
-        assert data["defaults"]["runner"] == "bob"
+        assert data["defaults"]["runner"] == "alt"
         assert data["defaults"]["model"] == "opus"
 
     def test_refuses_if_file_exists(self, config_dir: Path) -> None:
@@ -294,25 +294,242 @@ class TestProfilePrecedence:
 
         config_dir.write_text(
             '[defaults]\nrunner = "claude"\n\n'
-            '[credentials.vertex]\nFACTORY_RUNNER = "bob"'
+            '[credentials.vertex]\nFACTORY_RUNNER = "alt"'
         )
         monkeypatch.delenv("FACTORY_RUNNER", raising=False)
 
         load_config(profile="vertex")
         result = resolve("runner", env_var="FACTORY_RUNNER", default="claude")
-        assert result == "bob"
+        assert result == "alt"
 
-    def test_env_overrides_profile(
+    def test_profile_overrides_env(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from factory.user_config import load_config, resolve
 
-        config_dir.write_text('[credentials.vertex]\nFACTORY_RUNNER = "bob"')
+        config_dir.write_text('[credentials.vertex]\nFACTORY_RUNNER = "alt"')
         monkeypatch.setenv("FACTORY_RUNNER", "claude")
 
         load_config(profile="vertex")
         result = resolve("runner", cli_value=None, env_var="FACTORY_RUNNER", default="fallback")
-        assert result == "claude"
+        assert result == "alt"
+
+
+class TestEnvOverlay:
+    """Tests for profile env overlay: override, unset, protected vars."""
+
+    def test_profile_overrides_existing_env(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.test]\nFACTORY_RUNNER = "profile-value"'
+        )
+        monkeypatch.setenv("FACTORY_RUNNER", "original-value")
+        load_config(profile="test")
+        assert os.environ["FACTORY_RUNNER"] == "profile-value"
+
+    def test_unset_removes_env_var(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.test]\nFACTORY_RUNNER = "claude"\n\n'
+            '[credentials.test.unset]\n'
+            'vars = ["CLAUDE_CODE_USE_VERTEX"]'
+        )
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        load_config(profile="test")
+        assert "CLAUDE_CODE_USE_VERTEX" not in os.environ
+        assert os.environ["FACTORY_RUNNER"] == "claude"
+
+    def test_unset_missing_var_is_noop(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.test]\nFACTORY_RUNNER = "claude"\n\n'
+            '[credentials.test.unset]\n'
+            'vars = ["NONEXISTENT_VAR_XYZ"]'
+        )
+        monkeypatch.delenv("NONEXISTENT_VAR_XYZ", raising=False)
+        load_config(profile="test")
+        assert "NONEXISTENT_VAR_XYZ" not in os.environ
+
+    def test_protected_var_set_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nPATH = "/evil/path"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_protected_var_unset_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.bad]\nFACTORY_RUNNER = "claude"\n\n'
+            '[credentials.bad.unset]\n'
+            'vars = ["HOME"]'
+        )
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_unset_subtable_not_treated_as_credential(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.test]\nFACTORY_RUNNER = "claude"\n\n'
+            '[credentials.test.unset]\n'
+            'vars = ["SOME_VAR"]'
+        )
+        monkeypatch.delenv("unset", raising=False)
+        load_config(profile="test")
+        assert "unset" not in os.environ
+
+    def test_unset_before_set_order(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If a var appears in both set and unset, set wins (runs second)."""
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.test]\nMY_VAR = "set-value"\n\n'
+            '[credentials.test.unset]\n'
+            'vars = ["MY_VAR"]'
+        )
+        monkeypatch.setenv("MY_VAR", "original")
+        load_config(profile="test")
+        assert os.environ["MY_VAR"] == "set-value"
+
+    def test_show_config_handles_nested_subtables(self, config_dir: Path) -> None:
+        from factory.user_config import show_config
+
+        config_dir.write_text(
+            '[credentials.custom]\n'
+            'FACTORY_RUNNER = "claude"\n\n'
+            '[credentials.custom.unset]\n'
+            'vars = ["CLAUDE_CODE_USE_VERTEX"]'
+        )
+        output = show_config()
+        assert "[credentials.custom]" in output
+        assert "claude" in output
+        assert "unset" in output.lower()
+
+
+class TestHardenedProtectedVars:
+    """Tests for expanded protected variable list."""
+
+    def test_protected_var_ld_preload_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nLD_PRELOAD = "/evil/lib.so"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_protected_var_pythonpath_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nPYTHONPATH = "/evil"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_protected_var_ifs_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nIFS = "x"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_protected_var_dyld_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nDYLD_INSERT_LIBRARIES = "/evil"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+    def test_protected_var_factory_trace_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text('[credentials.bad]\nFACTORY_TRACE_ID = "injected"')
+        with pytest.raises(ValueError, match="protected variable"):
+            load_config(profile="bad")
+
+
+class TestUnsetVarsValidation:
+    """Tests for unset.vars type validation."""
+
+    def test_unset_vars_string_not_list_raises(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from factory.user_config import load_config
+
+        config_dir.write_text(
+            '[credentials.bad]\nFACTORY_RUNNER = "claude"\n\n'
+            '[credentials.bad.unset]\n'
+            'vars = "not-a-list"'
+        )
+        with pytest.raises(ValueError, match="must be a list"):
+            load_config(profile="bad")
+
+
+class TestOverrideWarning:
+    """Tests for structured log warning on env var override."""
+
+    def test_override_logs_warning(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        config_dir.write_text('[credentials.test]\nFACTORY_RUNNER = "new-value"')
+        monkeypatch.setenv("FACTORY_RUNNER", "old-value")
+
+        mock_log = MagicMock()
+        monkeypatch.setattr("factory.user_config.log", mock_log)
+
+        from factory.user_config import load_config
+        load_config(profile="test")
+
+        mock_log.warning.assert_any_call(
+            "profile_override", key="FACTORY_RUNNER", profile="test"
+        )
+
+
+class TestShowConfigMasksNestedSecrets:
+    """Tests for masking sensitive values in nested sub-tables."""
+
+    def test_show_config_masks_nested_secrets(self, config_dir: Path) -> None:
+        from factory.user_config import show_config
+
+        config_dir.write_text(
+            '[credentials.custom]\n'
+            'FACTORY_RUNNER = "claude"\n\n'
+            '[credentials.custom.secrets]\n'
+            'api_key = "super-secret-key-1234"\n'
+            'name = "visible"'
+        )
+        output = show_config()
+        assert "super-secret-key-1234" not in output
+        assert "1234" in output
+        assert "visible" in output
 
 
 class TestResolveEmptyTomlValue:
@@ -404,14 +621,14 @@ class TestShowConfigCredentialsAndOtherSections:
 
         config_dir.write_text(
             '[credentials.vertex]\nANTHROPIC_API_KEY = "sk-vert-1234"\n\n'
-            '[credentials.codex]\nCODEX_API_KEY = "sk-codex-5678"'
+            '[credentials.staging]\nSTAGING_API_KEY = "sk-staging-5678"'
         )
         output = show_config()
         assert "[credentials.vertex]" in output
-        assert "[credentials.codex]" in output
+        assert "[credentials.staging]" in output
         # Both keys should be masked
         assert "sk-vert-1234" not in output
-        assert "sk-codex-5678" not in output
+        assert "sk-staging-5678" not in output
         assert "1234" in output
         assert "5678" in output
 
@@ -427,19 +644,18 @@ class TestMigrateEnvToConfigMocked:
 
         # Mock tomli_w module
         mock_tomli_w = MagicMock()
-        mock_tomli_w.dumps.return_value = '[defaults]\nrunner = "bob"\n'
+        mock_tomli_w.dumps.return_value = '[defaults]\nrunner = "alt"\n'
         monkeypatch.setitem(sys.modules, "tomli_w", mock_tomli_w)
 
         # Clear all FACTORY_* env vars that migrate_env_to_config looks for
         for key in (
             "FACTORY_RUNNER", "FACTORY_MODEL", "FACTORY_PROJECTS_DIR",
             "FACTORY_VAULT_PATH", "FACTORY_PLAYBOOKS_DIR", "FACTORY_REGISTRY_DIR",
-            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_BOB_DRY_RUN",
-            "FACTORY_BOB_MAX_INVOCATIONS_PER_CYCLE", "FACTORY_CEO_RESPAWN_DISABLED",
+            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_CEO_RESPAWN_DISABLED",
             "FACTORY_CEO_MAX_RESPAWNS",
         ):
             monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("FACTORY_RUNNER", "bob")
+        monkeypatch.setenv("FACTORY_RUNNER", "alt")
         monkeypatch.setenv("FACTORY_MODEL", "opus")
 
         from factory.user_config import migrate_env_to_config
@@ -451,7 +667,7 @@ class TestMigrateEnvToConfigMocked:
         # Verify tomli_w.dumps was called with the right structure
         call_args = mock_tomli_w.dumps.call_args[0][0]
         assert "defaults" in call_args
-        assert call_args["defaults"]["runner"] == "bob"
+        assert call_args["defaults"]["runner"] == "alt"
         assert call_args["defaults"]["model"] == "opus"
 
     def test_migrate_no_env_vars_set(
@@ -468,8 +684,7 @@ class TestMigrateEnvToConfigMocked:
         for key in [
             "FACTORY_RUNNER", "FACTORY_MODEL", "FACTORY_PROJECTS_DIR",
             "FACTORY_VAULT_PATH", "FACTORY_PLAYBOOKS_DIR", "FACTORY_REGISTRY_DIR",
-            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_BOB_DRY_RUN",
-            "FACTORY_BOB_MAX_INVOCATIONS_PER_CYCLE", "FACTORY_CEO_RESPAWN_DISABLED",
+            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_CEO_RESPAWN_DISABLED",
             "FACTORY_CEO_MAX_RESPAWNS",
         ]:
             monkeypatch.delenv(key, raising=False)
@@ -527,8 +742,8 @@ class TestMigrateEnvToConfigMocked:
     def test_migrate_secure_permissions(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import sys
         import stat
+        import sys
         from unittest.mock import MagicMock
 
         mock_tomli_w = MagicMock()
@@ -538,8 +753,7 @@ class TestMigrateEnvToConfigMocked:
         for key in (
             "FACTORY_RUNNER", "FACTORY_MODEL", "FACTORY_PROJECTS_DIR",
             "FACTORY_VAULT_PATH", "FACTORY_PLAYBOOKS_DIR", "FACTORY_REGISTRY_DIR",
-            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_BOB_DRY_RUN",
-            "FACTORY_BOB_MAX_INVOCATIONS_PER_CYCLE", "FACTORY_CEO_RESPAWN_DISABLED",
+            "FACTORY_MANAGED_DIRS", "FACTORY_RUNNER_QUIET", "FACTORY_CEO_RESPAWN_DISABLED",
             "FACTORY_CEO_MAX_RESPAWNS",
         ):
             monkeypatch.delenv(key, raising=False)

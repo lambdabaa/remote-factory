@@ -27,11 +27,14 @@ factory/_version.py
 
 # Generated plugin agents (scripts/sync_agents.py)
 /agents/
-/codex-agents/
 
 # Generated workflow skills (built on-the-fly by factory skill_cache)
 skills/workflow-*/SKILL.md
 skills/workflow-*/SKILL.annotations.yaml
+
+# Exception: contributed workflow skills (not auto-generated)
+!skills/workflow-frontend-design/SKILL.md
+!skills/workflow-frontend-design/SKILL.annotations.yaml
 
 # Dev artifacts
 .playwright-mcp/
@@ -39,3 +42,4 @@ screenshots/
 docs/factory-slides/
 graphify-out/
 graph.json
+examples/chess_recordings/

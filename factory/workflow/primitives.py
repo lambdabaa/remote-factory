@@ -24,7 +24,6 @@ class AgentRole(str, Enum):
     CEO = "ceo"
     ARCHIVIST = "archivist"
     REFINER = "refiner"
-    SKILL_REVIEWER = "skill_reviewer"
 
 
 class AgentConfig(BaseModel):
@@ -50,7 +49,6 @@ DEFAULT_AGENT_POOL: dict[str, AgentConfig] = {
     "ceo": AgentConfig(role=AgentRole.CEO, model="opus", timeout=3600),
     "archivist": AgentConfig(role=AgentRole.ARCHIVIST, model="haiku", timeout=300),
     "refiner": AgentConfig(role=AgentRole.REFINER, model="opus", timeout=600),
-    "skill_reviewer": AgentConfig(role=AgentRole.SKILL_REVIEWER, model="opus", timeout=600),
 }
 
 
@@ -277,6 +275,9 @@ class Workflow(BaseModel):
     start_node: str
     terminal: bool = False
     trigger: TriggerFn | None = Field(default=None, exclude=True)
+    knob_values: dict[str, str | float] = Field(default_factory=dict)
+    knob_bounds: dict[str, list[str | float]] = Field(default_factory=dict)
+    knob_expandable: dict[str, str] = Field(default_factory=dict)
 
     def validate_graph(self) -> list[str]:
         """Validate workflow graph structure using NetworkX. Returns list of issues."""
@@ -307,6 +308,72 @@ class Workflow(BaseModel):
             if e.source in node_ids and e.target in node_ids
         ]
         return Workflow(name=name, nodes=nodes, edges=edges, start_node=start_node)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the workflow to a JSON-safe dict."""
+        nodes_out: dict[str, Any] = {}
+        for nid, node in self.nodes.items():
+            d = node.model_dump(mode="json")
+            d["_type"] = type(node).__name__
+            nodes_out[nid] = d
+
+        edges_out = [e.model_dump(mode="json") for e in self.edges]
+
+        result: dict[str, Any] = {
+            "name": self.name,
+            "nodes": nodes_out,
+            "edges": edges_out,
+            "start_node": self.start_node,
+            "terminal": self.terminal,
+        }
+        if self.knob_values:
+            result["knob_values"] = dict(self.knob_values)
+        if self.knob_bounds:
+            result["knob_bounds"] = {k: list(v) for k, v in self.knob_bounds.items()}
+        if self.knob_expandable:
+            result["knob_expandable"] = dict(self.knob_expandable)
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Workflow:
+        """Reconstruct a Workflow from a dict produced by ``to_dict``."""
+        _NODE_TYPE_MAP: dict[str, type[Node]] = {
+            "AgentNode": AgentNode,
+            "FnNode": FnNode,
+            "GateNode": GateNode,
+            "ForkNode": ForkNode,
+            "JoinNode": JoinNode,
+            "SubgraphForkNode": SubgraphForkNode,
+            "SelectionNode": SelectionNode,
+            "Study": Study,
+            "LLMNode": LLMNode,
+        }
+        _SET_FIELDS = {"reads", "writes"}
+
+        nodes: dict[str, NodeType] = {}
+        for nid, node_data in data["nodes"].items():
+            node_data = dict(node_data)
+            type_name = node_data.pop("_type", "FnNode")
+            node_cls = _NODE_TYPE_MAP.get(type_name)
+            if node_cls is None:
+                raise ValueError(f"Unknown node type: {type_name}")
+            for fld in _SET_FIELDS:
+                if fld in node_data and isinstance(node_data[fld], list):
+                    node_data[fld] = set(node_data[fld])
+            nodes[nid] = node_cls.model_validate(node_data, strict=False)  # type: ignore[assignment]
+
+        edges = [Edge.model_validate(e, strict=False) for e in data["edges"]]
+
+        return cls(
+            name=data["name"],
+            nodes=nodes,
+            edges=edges,
+            start_node=data["start_node"],
+            terminal=data.get("terminal", False),
+            knob_values=data.get("knob_values", {}),
+            knob_bounds={k: list(v) for k, v in data.get("knob_bounds", {}).items()},
+            knob_expandable=data.get("knob_expandable", {}),
+        )
 
 
 # ── factory ──────────────────────────────────────────────────────

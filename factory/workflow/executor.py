@@ -815,7 +815,9 @@ class WorkflowExecutor:
         """Invoke an agent via factory/agents/runner.py."""
         from factory.agents.runner import invoke_agent
 
-        task = node.prompt_template
+        task = node.prompt_template.replace(
+            "{project_path}", str(self.project_path),
+        )
         context = self.node_context.get(node.id, "")
         if context:
             task = f"{task}\n\n{context}"
@@ -841,7 +843,12 @@ class WorkflowExecutor:
         )
 
         if code != 0:
-            raise RuntimeError(f"agent {node.role.value} exited with code {code}")
+            log.warning(
+                "agent_nonzero_exit",
+                role=node.role.value,
+                code=code,
+                output_len=len(stdout),
+            )
 
         return stdout
 
@@ -888,14 +895,15 @@ class WorkflowExecutor:
         if node.evaluator_type == "fn":
             if node.evaluator_command:
                 cmd = node.evaluator_command.replace(
-                    "{project_path}", shlex.quote(str(self.project_path)),
+                    "{project_path}",
+                    shlex.quote(str(self.project_path)),
                 )
                 try:
                     output = await self._run_shell(cmd)
                     return self._parse_fn_verdict(output, node.id)
                 except RuntimeError:
                     return Verdict.halt(reason=f"gate command failed: {cmd}")
-            return Verdict.proceed()
+            return Verdict.halt(reason=f"gate '{node.id}' has no evaluator_command configured")
 
         prompt = self._build_gate_prompt(node)
         from factory.agents.runner import invoke_agent
@@ -977,7 +985,52 @@ class WorkflowExecutor:
             feedback = feedback_match.group(1) if feedback_match else "needs improvement"
             return Verdict.reloop(target=target, feedback=feedback)
 
-        return Verdict.proceed()
+        if text.startswith("PROCEED") or re.match(r"^PROCEED\b", text):
+            return Verdict.proceed()
+
+        first_line = ""
+        for line in lines:
+            if line.strip():
+                first_line = line.strip()
+                break
+
+        if first_line and first_line != last_line:
+            ft = first_line.upper()
+
+            if ft.startswith("HALT") or re.match(r"^HALT\b", ft):
+                reason_match = re.search(r'REASON="([^"]+)"', first_line, re.IGNORECASE)
+                reason = reason_match.group(1) if reason_match else "gate halted"
+                return Verdict.halt(reason=reason)
+
+            if ft.startswith("RELOOP") or re.match(r"^RELOOP\b", ft):
+                target_match = re.search(r'TARGET="([^"]+)"', first_line, re.IGNORECASE)
+                feedback_match = re.search(r'FEEDBACK="([^"]+)"', first_line, re.IGNORECASE)
+                target = target_match.group(1) if target_match else None
+
+                if target and target not in self.workflow.nodes:
+                    matches = [nid for nid in self.workflow.nodes if target in nid]
+                    if len(matches) == 1:
+                        target = matches[0]
+                    else:
+                        target = self._next_conditional(gate_id, VerdictType.RELOOP)
+
+                if not target:
+                    target = self._next_conditional(gate_id, VerdictType.RELOOP)
+                if not target:
+                    return Verdict.halt(reason=f"RELOOP verdict from gate '{gate_id}' missing target and no RELOOP edge defined")
+                feedback = feedback_match.group(1) if feedback_match else "needs improvement"
+                return Verdict.reloop(target=target, feedback=feedback)
+
+            if ft.startswith("PROCEED") or re.match(r"^PROCEED\b", ft):
+                return Verdict.proceed()
+
+        return Verdict.halt(
+            reason=(
+                f"gate '{gate_id}' returned unparseable verdict "
+                f"(expected PROCEED | RELOOP target=... | HALT reason=...): "
+                f"{output.strip()[:200]}"
+            )
+        )
 
     def _parse_fn_verdict(self, output: str, gate_id: str) -> Verdict:
         """Parse function output into a Verdict."""
@@ -995,7 +1048,7 @@ class WorkflowExecutor:
             pass
 
         first_line = text.split("\n")[0].strip().lower()
-        if first_line.startswith("pass"):
+        if first_line.startswith("pass") or first_line.startswith("proceed"):
             return Verdict.proceed()
         if first_line.startswith("fail") or first_line.startswith("revert"):
             return Verdict.halt(reason=f"precheck failed: {text[:200]}")
@@ -1007,16 +1060,33 @@ class WorkflowExecutor:
             if target:
                 return Verdict.reloop(target=target, feedback=feedback)
             return Verdict.halt(reason="fn gate returned RELOOP but no RELOOP edge defined")
-        return Verdict.proceed()
-
-    async def _run_shell(self, cmd: str) -> str:
-        """Run a shell command and return stdout."""
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.project_path,
+        return Verdict.halt(
+            reason=(
+                f"gate '{gate_id}' returned unparseable verdict "
+                f"(expected pass | fail | revert | reloop | {{\"passed\": bool}}): "
+                f"{text[:200]}"
+            )
         )
+
+    async def _run_shell_or_exec(self, cmd: str) -> str:
+        """Run a command, using exec mode for python3 -c to avoid quote issues."""
+        import re
+        m = re.match(r"""^python3\s+-c\s+(['"])(.*)\1\s*$""", cmd, re.DOTALL)
+        if m:
+            code = m.group(2)
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "-c", code,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.project_path,
+            )
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.project_path,
+            )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode() if stdout_bytes else ""
 
@@ -1027,6 +1097,10 @@ class WorkflowExecutor:
             )
 
         return stdout
+
+    async def _run_shell(self, cmd: str) -> str:
+        """Run a shell command and return stdout."""
+        return await self._run_shell_or_exec(cmd)
 
     async def _wait_for_reads(self, node: NodeType) -> None:
         """Wait until all files in node.reads are available in completed_files."""
